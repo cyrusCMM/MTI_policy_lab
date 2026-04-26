@@ -145,18 +145,37 @@ def get_mobile_view():
 
 def display_table(df, max_mobile_rows=50, **kwargs):
     """
-    Mobile-safe dataframe display.
-    On mobile/executive view, large tables are previewed to avoid slow scrolling.
-    Prevents duplicate use_container_width errors from existing dataframe calls.
+    Safe mobile-friendly dataframe display.
+
+    This helper protects Streamlit Cloud from:
+    - None outputs
+    - Series outputs
+    - non-DataFrame objects
+    - duplicate use_container_width arguments
+    - very large tables on mobile/executive view
     """
     use_container_width = kwargs.pop("use_container_width", True)
 
+    if df is None:
+        st.info("No data available.")
+        return
+
+    if isinstance(df, pd.Series):
+        df = df.to_frame()
+
     if not isinstance(df, pd.DataFrame):
-        st.dataframe(df, use_container_width=use_container_width, **kwargs)
+        st.write(df)
+        return
+
+    if df.empty:
+        st.info("No rows available.")
         return
 
     if get_mobile_view() and len(df) > max_mobile_rows:
-        st.caption(f"Mobile preview: showing first {max_mobile_rows:,} of {len(df):,} rows. Download/export or switch off Mobile-friendly view for full table.")
+        st.caption(
+            f"Mobile preview: showing first {max_mobile_rows:,} of {len(df):,} rows. "
+            "Download/export or switch off Mobile-friendly view for the full table."
+        )
         st.dataframe(df.head(max_mobile_rows), use_container_width=use_container_width, **kwargs)
     else:
         st.dataframe(df, use_container_width=use_container_width, **kwargs)
@@ -1306,6 +1325,16 @@ def show_baseline_only_dashboard(baseline, analysis_population):
     st.stop()
 
 
+def format_dataframe_values(df, func):
+    """Compatibility helper for applying a formatting function elementwise."""
+    if not isinstance(df, pd.DataFrame):
+        return df
+    try:
+        return df.map(func)
+    except AttributeError:
+        return df.applymap(func)
+
+
 def plot_transition_heatmap(counts):
     fig, ax = plt.subplots(figsize=chart_size(default=(9, 7), mobile=(7, 5.2)))
     data = counts.to_numpy(dtype=float)
@@ -1448,7 +1477,7 @@ st.session_state["scenario_name"] = st.sidebar.text_input("New scenario name", v
 
 if not isinstance(st.session_state.get("scenarios"), dict):
     st.session_state["scenarios"] = {}
-saved_names = list(st.session_state.get("scenarios") if isinstance(st.session_state.get("scenarios"), dict) else {}.keys())
+saved_names = list(st.session_state.get("scenarios", {}).keys()) if isinstance(st.session_state.get("scenarios"), dict) else []
 if saved_names:
     current_active = st.session_state.get("active_scenario")
     idx = saved_names.index(current_active) if current_active in saved_names else 0
@@ -1786,7 +1815,10 @@ with tc2:
     display_table(transition_counts, use_container_width=True)
 with tc3:
     st.caption("Each row sums to 100% where students existed in that baseline class.")
-    display_table(transition_shares.applymap(fmt_share), use_container_width=True)
+    if isinstance(transition_shares, pd.DataFrame) and not transition_shares.empty:
+        display_table(format_dataframe_values(transition_shares, fmt_share), use_container_width=True)
+    else:
+        st.info("Transition shares not available.")
 with tc4:
     st.caption("Moved up means the student shifted to a higher MTI score; moved down means the scenario reduced the MTI score.")
     display_table(style_table(movement_summary), use_container_width=True, hide_index=True)
