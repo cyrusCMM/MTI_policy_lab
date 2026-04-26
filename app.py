@@ -67,7 +67,9 @@ def fmt_share(x):
 
 
 def style_indexed(df):
-    out = df.copy()
+    # Pandas 2.x/3.x on Streamlit Cloud rejects assigning strings into numeric columns.
+    # Convert to object first so all formatted display values are safe.
+    out = df.copy().astype("object")
     for idx in out.index:
         for col in out.columns:
             v = out.loc[idx, col]
@@ -83,13 +85,14 @@ def style_indexed(df):
 
 
 def style_table(df):
-    out = df.copy()
+    # Convert to object before formatting to avoid dtype assignment errors on Streamlit Cloud.
+    out = df.copy().astype("object")
     for col in out.columns:
         if col in MONEY_COLS:
             out[col] = out[col].map(fmt_ksh)
-        elif "share" in col.lower() or col.endswith("_rate"):
+        elif "share" in str(col).lower() or str(col).endswith("_rate"):
             out[col] = out[col].map(fmt_share)
-        elif col == "students" or col.endswith("_students") or col in {"baseline_students", "scenario_students", "student_change", "cumulative_student_change"}:
+        elif col == "students" or str(col).endswith("_students") or col in {"baseline_students", "scenario_students", "student_change", "cumulative_student_change"}:
             out[col] = out[col].map(lambda x: f"{float(x):,.0f}" if pd.notna(x) else x)
         elif col in {"mean_mti", "median_mti", "mean_mti_baseline", "mean_mti_scenario", "mean_mti_change"}:
             out[col] = out[col].map(lambda x: f"{float(x):,.2f}" if pd.notna(x) else x)
@@ -1248,57 +1251,27 @@ base_policy = fresh_policy()
 st.title("MTI Policy Lab")
 st.caption("Select analysis population first, run baseline for that population, then create scenarios against that stored baseline.")
 
-st.sidebar.header("1. Data Source")
-
-# Deployment-ready data loading:
-# 1) Prefer Streamlit secret DATA_URL if configured.
-# 2) Else use bundled repo file Application Data 2025_2026.csv if it exists.
-# 3) Else allow manual upload as a fallback.
-#
-# For PS/easy live use, push the CSV to the repo OR set DATA_URL in Streamlit secrets.
-# Example Streamlit secret:
-# DATA_URL = "https://raw.githubusercontent.com/cyrusCMM/MTI_policy_lab/main/Application%20Data%202025_2026.csv"
-
-DEFAULT_DATA_FILE = Path("Application Data 2025_2026.csv")
-DATA_URL = None
-
-try:
-    DATA_URL = st.secrets.get("DATA_URL", None)
-except Exception:
-    DATA_URL = None
-
-uploaded_file = st.sidebar.file_uploader(
-    "Optional: upload a different intake CSV",
-    type=["csv"],
-    help="The app automatically loads the live/default dataset. Upload only if you want to override it."
-)
-
-raw_df = None
-data_name = None
+st.sidebar.header("1. Data Input")
+uploaded_file = st.sidebar.file_uploader("Upload intake CSV", type=["csv"])
+default_path = Path("Application Data 2025_2026.csv")
 
 try:
     if uploaded_file is not None:
         raw_df = pd.read_csv(uploaded_file)
-        data_name = f"Uploaded file: {uploaded_file.name}"
-    elif DATA_URL:
-        raw_df = pd.read_csv(DATA_URL)
-        data_name = "Live data from configured DATA_URL"
-    elif DEFAULT_DATA_FILE.exists():
-        raw_df = pd.read_csv(DEFAULT_DATA_FILE)
-        data_name = f"Bundled repo data: {DEFAULT_DATA_FILE.name}"
+        data_name = uploaded_file.name
+    elif default_path.exists():
+        raw_df = pd.read_csv(default_path)
+        data_name = default_path.name
     else:
         raw_df = None
         data_name = None
 except Exception as exc:
-    st.error("Could not read the intake CSV from upload, DATA_URL, or bundled repo file.")
+    st.error("Could not read the intake CSV.")
     st.exception(exc)
     st.stop()
 
-if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
-    st.error(
-        "No intake data found. For live deployment, either push Application Data 2025_2026.csv "
-        "to the GitHub repo, or set DATA_URL in Streamlit secrets."
-    )
+if not isinstance(raw_df, pd.DataFrame):
+    st.warning("Upload an intake CSV or place Application Data 2025_2026.csv in the same folder as app.py.")
     st.stop()
 
 st.sidebar.success(f"Loaded: {data_name} | Rows: {len(raw_df):,}")
