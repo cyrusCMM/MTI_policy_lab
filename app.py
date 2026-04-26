@@ -5,6 +5,7 @@ line distributions, min/max stats, MTI class frequencies, and transition matrix.
 
 from pathlib import Path
 import copy
+import re
 
 import numpy as np
 import pandas as pd
@@ -724,14 +725,26 @@ PUBLIC_UNIVERSITY_NAMES = {
     "SOUTH EASTERN KENYA UNIVERSITY", "TAITA TAVETA UNIVERSITY", "TECHNICAL UNIVERSITY OF KENYA",
     "TECHNICAL UNIVERSITY OF MOMBASA", "THARAKA UNIVERSITY", "TOM MBOYA UNIVERSITY",
     "TURKANA UNIVERSITY COLLEGE", "UNIVERSITY OF ELDORET", "UNIVERSITY OF EMBU",
-    "UNIVERSITY OF KABIANGA", "UNIVERSITY OF NAIROBI"
+    "UNIVERSITY OF KABIANGA", "UNIVERSITY OF NAIROBI", "OPEN UNIVERSITY OF KENYA", "THE OPEN UNIVERSITY OF KENYA"
 }
 
 
 def normalize_institution_name(value):
+    """
+    Robust institution-name normalizer for public/private classification.
+
+    It makes matching insensitive to hyphens, apostrophes, dots, commas,
+    double spaces and common punctuation differences, e.g.
+    "CO-OPERATIVE UNIVERSITY OF KENYA" == "CO OPERATIVE UNIVERSITY OF KENYA".
+    """
     x = str(value).upper().strip()
-    x = x.replace("’", "'").replace("`", "'")
-    return " ".join(x.split())
+    x = x.replace("&", " AND ")
+    x = re.sub(r"[^A-Z0-9]+", " ", x)
+    x = re.sub(r"\s+", " ", x).strip()
+    return x
+
+
+PUBLIC_UNIVERSITY_KEYS = {normalize_institution_name(x) for x in PUBLIC_UNIVERSITY_NAMES}
 
 
 def institution_col(df):
@@ -752,7 +765,7 @@ def add_track_and_ownership(df):
     out["education_track"] = np.where(tvet_mask, "TVET", "University")
     inst = institution_col(out)
     if inst is not None:
-        public_mask = out[inst].map(normalize_institution_name).isin(PUBLIC_UNIVERSITY_NAMES)
+        public_mask = out[inst].map(normalize_institution_name).isin(PUBLIC_UNIVERSITY_KEYS)
     else:
         public_mask = pd.Series(False, index=out.index)
     out["ownership_group"] = np.select(
@@ -1125,6 +1138,17 @@ def show_baseline_only_dashboard(baseline, analysis_population):
         st.dataframe(style_table(sector_base), use_container_width=True, hide_index=True)
     else:
         st.info("Sector baseline split is not available.")
+
+    with st.expander("Institution classification check"):
+        inst_check_col = institution_col(base_df)
+        if inst_check_col:
+            check_tbl = (
+                base_df[[inst_check_col, "education_track", "ownership_group"]]
+                .drop_duplicates()
+                .sort_values(["ownership_group", inst_check_col])
+            )
+            st.caption("Use this to verify whether an institution is being classified as Public University, Private University / Other, or TVET.")
+            st.dataframe(check_tbl, use_container_width=True, hide_index=True)
 
     st.subheader("Baseline MTI distribution")
     if "MTI_final" in base_df.columns:
@@ -1542,6 +1566,17 @@ if not sector_summary.empty:
     st.dataframe(style_table(sector_summary), use_container_width=True, hide_index=True)
 else:
     st.info("Sector summary could not be computed.")
+
+with st.expander("Institution classification check"):
+    inst_check_col = institution_col(scen_df)
+    if inst_check_col:
+        check_tbl = (
+            scen_df[[inst_check_col, "education_track", "ownership_group"]]
+            .drop_duplicates()
+            .sort_values(["ownership_group", inst_check_col])
+        )
+        st.caption("Use this to verify whether an institution is being classified as Public University, Private University / Other, or TVET.")
+        st.dataframe(check_tbl, use_container_width=True, hide_index=True)
 
 st.header("Baseline vs Scenario Diagnostics")
 try:
