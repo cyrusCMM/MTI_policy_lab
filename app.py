@@ -1248,27 +1248,57 @@ base_policy = fresh_policy()
 st.title("MTI Policy Lab")
 st.caption("Select analysis population first, run baseline for that population, then create scenarios against that stored baseline.")
 
-st.sidebar.header("1. Data Input")
-uploaded_file = st.sidebar.file_uploader("Upload intake CSV", type=["csv"])
-default_path = Path("Application Data 2025_2026.csv")
+st.sidebar.header("1. Data Source")
+
+# Deployment-ready data loading:
+# 1) Prefer Streamlit secret DATA_URL if configured.
+# 2) Else use bundled repo file Application Data 2025_2026.csv if it exists.
+# 3) Else allow manual upload as a fallback.
+#
+# For PS/easy live use, push the CSV to the repo OR set DATA_URL in Streamlit secrets.
+# Example Streamlit secret:
+# DATA_URL = "https://raw.githubusercontent.com/cyrusCMM/MTI_policy_lab/main/Application%20Data%202025_2026.csv"
+
+DEFAULT_DATA_FILE = Path("Application Data 2025_2026.csv")
+DATA_URL = None
+
+try:
+    DATA_URL = st.secrets.get("DATA_URL", None)
+except Exception:
+    DATA_URL = None
+
+uploaded_file = st.sidebar.file_uploader(
+    "Optional: upload a different intake CSV",
+    type=["csv"],
+    help="The app automatically loads the live/default dataset. Upload only if you want to override it."
+)
+
+raw_df = None
+data_name = None
 
 try:
     if uploaded_file is not None:
         raw_df = pd.read_csv(uploaded_file)
-        data_name = uploaded_file.name
-    elif default_path.exists():
-        raw_df = pd.read_csv(default_path)
-        data_name = default_path.name
+        data_name = f"Uploaded file: {uploaded_file.name}"
+    elif DATA_URL:
+        raw_df = pd.read_csv(DATA_URL)
+        data_name = "Live data from configured DATA_URL"
+    elif DEFAULT_DATA_FILE.exists():
+        raw_df = pd.read_csv(DEFAULT_DATA_FILE)
+        data_name = f"Bundled repo data: {DEFAULT_DATA_FILE.name}"
     else:
         raw_df = None
         data_name = None
 except Exception as exc:
-    st.error("Could not read the intake CSV.")
+    st.error("Could not read the intake CSV from upload, DATA_URL, or bundled repo file.")
     st.exception(exc)
     st.stop()
 
-if not isinstance(raw_df, pd.DataFrame):
-    st.warning("Upload an intake CSV or place Application Data 2025_2026.csv in the same folder as app.py.")
+if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
+    st.error(
+        "No intake data found. For live deployment, either push Application Data 2025_2026.csv "
+        "to the GitHub repo, or set DATA_URL in Streamlit secrets."
+    )
     st.stop()
 
 st.sidebar.success(f"Loaded: {data_name} | Rows: {len(raw_df):,}")
