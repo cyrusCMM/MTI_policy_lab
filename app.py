@@ -5,7 +5,6 @@ line distributions, min/max stats, MTI class frequencies, and transition matrix.
 
 from pathlib import Path
 import copy
-import re
 
 import numpy as np
 import pandas as pd
@@ -28,6 +27,45 @@ st.markdown("""
 }
 [data-testid="stMetricLabel"] { font-size: 0.88rem !important; }
 .block-container { padding-top: 1.4rem; }
+
+/* Mobile / small-screen improvements */
+@media (max-width: 768px) {
+    h1 {
+        font-size: 2.15rem !important;
+        line-height: 1.08 !important;
+        margin-bottom: 0.35rem !important;
+    }
+    h2 {
+        font-size: 1.45rem !important;
+        line-height: 1.15 !important;
+    }
+    h3 {
+        font-size: 1.20rem !important;
+        line-height: 1.15 !important;
+    }
+    p, li, div, span {
+        font-size: 0.95rem;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 1.05rem !important;
+        line-height: 1.08 !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.74rem !important;
+    }
+    .block-container {
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+        padding-top: 0.65rem !important;
+    }
+    [data-testid="stDataFrame"] {
+        font-size: 0.78rem !important;
+    }
+    [data-testid="stExpander"] details summary p {
+        font-size: 0.95rem !important;
+        font-weight: 650 !important;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,6 +136,35 @@ def style_table(df):
         elif col in {"mean_mti", "median_mti", "mean_mti_baseline", "mean_mti_scenario", "mean_mti_change"}:
             out[col] = out[col].map(lambda x: f"{float(x):,.2f}" if pd.notna(x) else x)
     return out
+
+
+def get_mobile_view():
+    """Global display flag. Keeps policy logic unchanged; only changes presentation."""
+    return bool(st.session_state.get("mobile_view", False))
+
+
+def display_table(df, max_mobile_rows=50, **kwargs):
+    """
+    Mobile-safe dataframe display.
+    On mobile/executive view, large tables are previewed to avoid slow scrolling.
+    Prevents duplicate use_container_width errors from existing dataframe calls.
+    """
+    use_container_width = kwargs.pop("use_container_width", True)
+
+    if not isinstance(df, pd.DataFrame):
+        st.dataframe(df, use_container_width=use_container_width, **kwargs)
+        return
+
+    if get_mobile_view() and len(df) > max_mobile_rows:
+        st.caption(f"Mobile preview: showing first {max_mobile_rows:,} of {len(df):,} rows. Download/export or switch off Mobile-friendly view for full table.")
+        st.dataframe(df.head(max_mobile_rows), use_container_width=use_container_width, **kwargs)
+    else:
+        st.dataframe(df, use_container_width=use_container_width, **kwargs)
+
+
+def chart_size(default=(12, 5.5), mobile=(7.0, 4.2)):
+    return mobile if get_mobile_view() else default
+
 
 
 def fresh_policy():
@@ -413,7 +480,7 @@ def stats_text(stats, money=False):
 
 
 def plot_smooth_distribution(base_series, scen_series, title, xlabel, money=False):
-    fig, ax = plt.subplots(figsize=(12, 5.5))
+    fig, ax = plt.subplots(figsize=chart_size())
     bx, by, _ = smooth_density(base_series)
     sx, sy, _ = smooth_density(scen_series)
     if bx.size == 1:
@@ -440,7 +507,7 @@ def plot_change_distribution(base_series, scen_series, title, xlabel, money=Fals
     scen = pd.to_numeric(scen_series, errors="coerce")
     idx = base.dropna().index.intersection(scen.dropna().index)
     change = (scen.loc[idx] - base.loc[idx]).dropna()
-    fig, ax = plt.subplots(figsize=(12, 5.5))
+    fig, ax = plt.subplots(figsize=chart_size())
     x, y, _ = smooth_density(change)
     if x.size == 1:
         ax.axvline(x[0], linewidth=2.5, label="All comparable students have same change")
@@ -725,26 +792,14 @@ PUBLIC_UNIVERSITY_NAMES = {
     "SOUTH EASTERN KENYA UNIVERSITY", "TAITA TAVETA UNIVERSITY", "TECHNICAL UNIVERSITY OF KENYA",
     "TECHNICAL UNIVERSITY OF MOMBASA", "THARAKA UNIVERSITY", "TOM MBOYA UNIVERSITY",
     "TURKANA UNIVERSITY COLLEGE", "UNIVERSITY OF ELDORET", "UNIVERSITY OF EMBU",
-    "UNIVERSITY OF KABIANGA", "UNIVERSITY OF NAIROBI", "OPEN UNIVERSITY OF KENYA", "THE OPEN UNIVERSITY OF KENYA"
+    "UNIVERSITY OF KABIANGA", "UNIVERSITY OF NAIROBI"
 }
 
 
 def normalize_institution_name(value):
-    """
-    Robust institution-name normalizer for public/private classification.
-
-    It makes matching insensitive to hyphens, apostrophes, dots, commas,
-    double spaces and common punctuation differences, e.g.
-    "CO-OPERATIVE UNIVERSITY OF KENYA" == "CO OPERATIVE UNIVERSITY OF KENYA".
-    """
     x = str(value).upper().strip()
-    x = x.replace("&", " AND ")
-    x = re.sub(r"[^A-Z0-9]+", " ", x)
-    x = re.sub(r"\s+", " ", x).strip()
-    return x
-
-
-PUBLIC_UNIVERSITY_KEYS = {normalize_institution_name(x) for x in PUBLIC_UNIVERSITY_NAMES}
+    x = x.replace("’", "'").replace("`", "'")
+    return " ".join(x.split())
 
 
 def institution_col(df):
@@ -765,7 +820,7 @@ def add_track_and_ownership(df):
     out["education_track"] = np.where(tvet_mask, "TVET", "University")
     inst = institution_col(out)
     if inst is not None:
-        public_mask = out[inst].map(normalize_institution_name).isin(PUBLIC_UNIVERSITY_KEYS)
+        public_mask = out[inst].map(normalize_institution_name).isin(PUBLIC_UNIVERSITY_NAMES)
     else:
         public_mask = pd.Series(False, index=out.index)
     out["ownership_group"] = np.select(
@@ -852,14 +907,14 @@ def show_segment_detail(segment_name, base_seg, scen_seg):
     c4.metric("Gov tuition", fmt_ksh(pd.to_numeric(scen_seg['SS'], errors='coerce').sum() + pd.to_numeric(scen_seg['LL'], errors='coerce').sum()))
     seg_summary = compare_student_aggregates(base_seg, scen_seg, ["ownership_group"])
     if not seg_summary.empty:
-        st.dataframe(style_table(seg_summary), use_container_width=True, hide_index=True)
+        display_table(style_table(seg_summary), use_container_width=True, hide_index=True)
     inst = institution_col(scen_seg)
     tab_a, tab_b, tab_c, tab_d = st.tabs(["Institutions", "Programmes", "Counties", "Allocation diagnostics"])
     with tab_a:
         if inst is not None:
             inst_tbl = compare_student_aggregates(base_seg, scen_seg, [inst])
             if not inst_tbl.empty:
-                st.dataframe(style_table(inst_tbl.sort_values("program_cost_scenario", ascending=False)), use_container_width=True, hide_index=True)
+                display_table(style_table(inst_tbl.sort_values("program_cost_scenario", ascending=False)), use_container_width=True, hide_index=True)
             else:
                 st.info("Institution table not available.")
         else:
@@ -868,7 +923,7 @@ def show_segment_detail(segment_name, base_seg, scen_seg):
         if "ProgramDescription" in scen_seg.columns:
             prog_tbl = compare_student_aggregates(base_seg, scen_seg, ["ProgramDescription"])
             if not prog_tbl.empty:
-                st.dataframe(style_table(prog_tbl.sort_values("program_cost_scenario", ascending=False).head(100)), use_container_width=True, hide_index=True)
+                display_table(style_table(prog_tbl.sort_values("program_cost_scenario", ascending=False).head(100)), use_container_width=True, hide_index=True)
             else:
                 st.info("Programme table not available.")
         else:
@@ -877,7 +932,7 @@ def show_segment_detail(segment_name, base_seg, scen_seg):
         if "County" in scen_seg.columns:
             county_tbl = compare_student_aggregates(base_seg, scen_seg, ["County"])
             if not county_tbl.empty:
-                st.dataframe(style_table(county_tbl.sort_values("program_cost_scenario", ascending=False)), use_container_width=True, hide_index=True)
+                display_table(style_table(county_tbl.sort_values("program_cost_scenario", ascending=False)), use_container_width=True, hide_index=True)
             else:
                 st.info("County table not available.")
         else:
@@ -885,7 +940,7 @@ def show_segment_detail(segment_name, base_seg, scen_seg):
     with tab_d:
         diag = allocation_policy_stats(base_seg, scen_seg, ["HH", "SS", "LL", "Upkeep", "TotalLoan_with_Upkeep"])
         if not diag.empty:
-            st.dataframe(style_table(diag), use_container_width=True, hide_index=True)
+            display_table(style_table(diag), use_container_width=True, hide_index=True)
         opts = [c for c in ["HH", "SS", "LL", "Upkeep", "TotalLoan_with_Upkeep"] if c in base_seg.columns and c in scen_seg.columns]
         if opts:
             alloc_col = st.selectbox(f"Distribution component - {segment_name}", opts, key=f"dist_{segment_name}")
@@ -1077,7 +1132,7 @@ def baseline_allocation_stats(df, components):
 
 
 def plot_single_smooth_distribution(series, title, xlabel, money=False):
-    fig, ax = plt.subplots(figsize=(12, 5.5))
+    fig, ax = plt.subplots(figsize=chart_size())
     x, y, _ = smooth_density(series)
     if x.size == 1:
         ax.axvline(x[0], linewidth=2.5, label="Baseline")
@@ -1127,28 +1182,30 @@ def show_baseline_only_dashboard(baseline, analysis_population):
     b3.metric("Programme cost", fmt_ksh(safe_numeric_col(base_df, "PC_allocation").sum()))
     b4.metric("Gov tuition", fmt_ksh(safe_numeric_col(base_df, "SS").sum() + safe_numeric_col(base_df, "LL").sum()))
 
+    if get_mobile_view():
+        st.subheader("Executive baseline summary")
+        exec_rows = pd.DataFrame([
+            {"Measure": "Students", "Value": f"{len(base_df):,}"},
+            {"Measure": "Mean MTI", "Value": "N/A" if pd.isna(mean_mti_val) else f"{mean_mti_val:,.2f}"},
+            {"Measure": "Programme cost", "Value": fmt_ksh(safe_numeric_col(base_df, "PC_allocation").sum())},
+            {"Measure": "Household contribution", "Value": fmt_ksh(safe_numeric_col(base_df, "HH").sum())},
+            {"Measure": "Scholarship", "Value": fmt_ksh(safe_numeric_col(base_df, "SS").sum())},
+            {"Measure": "Loan", "Value": fmt_ksh(safe_numeric_col(base_df, "LL").sum())},
+            {"Measure": "Upkeep", "Value": fmt_ksh(safe_numeric_col(base_df, "Upkeep").sum())},
+        ])
+        display_table(exec_rows, hide_index=True)
+
     st.subheader("Baseline aggregate financing structure")
     baseline_agg = baseline_aggregate_from_student_df(base_df)
     if not baseline_agg.empty:
-        st.dataframe(style_indexed(baseline_agg), use_container_width=True)
+        display_table(style_indexed(baseline_agg), use_container_width=True)
 
     st.subheader("Public / Private University and TVET baseline split")
     sector_base = aggregate_student_level(base_df, ["education_track", "ownership_group"])
     if not sector_base.empty:
-        st.dataframe(style_table(sector_base), use_container_width=True, hide_index=True)
+        display_table(style_table(sector_base), use_container_width=True, hide_index=True)
     else:
         st.info("Sector baseline split is not available.")
-
-    with st.expander("Institution classification check"):
-        inst_check_col = institution_col(base_df)
-        if inst_check_col:
-            check_tbl = (
-                base_df[[inst_check_col, "education_track", "ownership_group"]]
-                .drop_duplicates()
-                .sort_values(["ownership_group", inst_check_col])
-            )
-            st.caption("Use this to verify whether an institution is being classified as Public University, Private University / Other, or TVET.")
-            st.dataframe(check_tbl, use_container_width=True, hide_index=True)
 
     st.subheader("Baseline MTI distribution")
     if "MTI_final" in base_df.columns:
@@ -1163,14 +1220,14 @@ def show_baseline_only_dashboard(baseline, analysis_population):
         "cumulative_students": "baseline_cumulative_students",
         "cumulative_share": "baseline_cumulative_share",
     })
-    st.dataframe(style_table(freq_base), use_container_width=True, hide_index=True)
+    display_table(style_table(freq_base), use_container_width=True, hide_index=True)
 
     st.subheader("Baseline MTI component statistics")
     score_components = ["S_primary", "S_secondary", "S_poverty", "S_family", "MTI_baseline", "MTI_after_equity", "MTI_final", "IncomeAdjustmentRatio"]
     available_components = [c for c in score_components if c in base_df.columns]
     comp_base = baseline_component_summary(base_df, available_components)
     if not comp_base.empty:
-        st.dataframe(style_table(comp_base), use_container_width=True, hide_index=True)
+        display_table(style_table(comp_base), use_container_width=True, hide_index=True)
         selected_score = st.selectbox("Baseline MTI score/component", available_components, key="baseline_component_dist")
         st.pyplot(plot_single_smooth_distribution(base_df[selected_score], selected_score, "Score", money=False), use_container_width=True)
     else:
@@ -1181,7 +1238,7 @@ def show_baseline_only_dashboard(baseline, analysis_population):
     alloc_base = baseline_allocation_stats(base_df, alloc_components)
     if not alloc_base.empty:
         st.caption("Min/max are student-level extremes. Total is aggregate amount where applicable.")
-        st.dataframe(style_table(alloc_base), use_container_width=True, hide_index=True)
+        display_table(style_table(alloc_base), use_container_width=True, hide_index=True)
         selected_alloc = st.selectbox("Baseline allocation component", alloc_components, key="baseline_alloc_dist")
         is_money = selected_alloc not in {"SS_gap_share", "LL_gap_share"}
         st.pyplot(
@@ -1196,7 +1253,7 @@ def show_baseline_only_dashboard(baseline, analysis_population):
         if inst:
             inst_tbl = aggregate_student_level(base_df, [inst])
             if not inst_tbl.empty:
-                st.dataframe(style_table(inst_tbl.sort_values("program_cost", ascending=False)), use_container_width=True, hide_index=True)
+                display_table(style_table(inst_tbl.sort_values("program_cost", ascending=False)), use_container_width=True, hide_index=True)
             else:
                 st.info("Institution table not available.")
         else:
@@ -1205,7 +1262,7 @@ def show_baseline_only_dashboard(baseline, analysis_population):
         if "ProgramDescription" in base_df.columns:
             prog_tbl = aggregate_student_level(base_df, ["ProgramDescription"])
             if not prog_tbl.empty:
-                st.dataframe(style_table(prog_tbl.sort_values("program_cost", ascending=False).head(200)), use_container_width=True, hide_index=True)
+                display_table(style_table(prog_tbl.sort_values("program_cost", ascending=False).head(200)), use_container_width=True, hide_index=True)
             else:
                 st.info("Programme table not available.")
         else:
@@ -1214,7 +1271,7 @@ def show_baseline_only_dashboard(baseline, analysis_population):
         if "County" in base_df.columns:
             county_tbl = aggregate_student_level(base_df, ["County"])
             if not county_tbl.empty:
-                st.dataframe(style_table(county_tbl.sort_values("program_cost", ascending=False)), use_container_width=True, hide_index=True)
+                display_table(style_table(county_tbl.sort_values("program_cost", ascending=False)), use_container_width=True, hide_index=True)
             else:
                 st.info("County table not available.")
         else:
@@ -1230,11 +1287,11 @@ def show_baseline_only_dashboard(baseline, analysis_population):
                 st.info(f"No records found for {seg}.")
             else:
                 seg_agg = baseline_aggregate_from_student_df(seg_df)
-                st.dataframe(style_indexed(seg_agg), use_container_width=True)
+                display_table(style_indexed(seg_agg), use_container_width=True)
                 seg_inst = institution_col(seg_df)
                 if seg_inst:
                     seg_tbl = aggregate_student_level(seg_df, [seg_inst])
-                    st.dataframe(style_table(seg_tbl.sort_values("program_cost", ascending=False)), use_container_width=True, hide_index=True)
+                    display_table(style_table(seg_tbl.sort_values("program_cost", ascending=False)), use_container_width=True, hide_index=True)
 
     st.subheader("Download baseline outputs")
     d1, d2, d3 = st.columns(3)
@@ -1250,7 +1307,7 @@ def show_baseline_only_dashboard(baseline, analysis_population):
 
 
 def plot_transition_heatmap(counts):
-    fig, ax = plt.subplots(figsize=(9, 7))
+    fig, ax = plt.subplots(figsize=chart_size(default=(9, 7), mobile=(7, 5.2)))
     data = counts.to_numpy(dtype=float)
     im = ax.imshow(data, aspect="auto")
     ax.set_xticks(np.arange(len(counts.columns)))
@@ -1274,28 +1331,50 @@ base_policy = fresh_policy()
 
 st.title("MTI Policy Lab")
 st.caption("Select analysis population first, run baseline for that population, then create scenarios against that stored baseline.")
+st.toggle("Mobile-friendly / Executive view", value=False, key="mobile_view", help="Simplifies display on phones by shrinking text, limiting large table previews, and collapsing heavy sections.")
 
-st.sidebar.header("1. Data Input")
-uploaded_file = st.sidebar.file_uploader("Upload intake CSV", type=["csv"])
-default_path = Path("Application Data 2025_2026.csv")
+st.sidebar.header("1. Data Source")
+
+DEFAULT_DATA_FILE = Path("Application Data 2025_2026.csv")
+DATA_URL = None
+
+try:
+    DATA_URL = st.secrets.get("DATA_URL", None)
+except Exception:
+    DATA_URL = None
+
+uploaded_file = st.sidebar.file_uploader(
+    "Optional: upload a different intake CSV",
+    type=["csv"],
+    help="The app automatically loads the live/default dataset. Upload only if you want to override it."
+)
+
+raw_df = None
+data_name = None
 
 try:
     if uploaded_file is not None:
         raw_df = pd.read_csv(uploaded_file)
-        data_name = uploaded_file.name
-    elif default_path.exists():
-        raw_df = pd.read_csv(default_path)
-        data_name = default_path.name
+        data_name = f"Uploaded file: {uploaded_file.name}"
+    elif DATA_URL:
+        raw_df = pd.read_csv(DATA_URL)
+        data_name = "Live data from configured DATA_URL"
+    elif DEFAULT_DATA_FILE.exists():
+        raw_df = pd.read_csv(DEFAULT_DATA_FILE)
+        data_name = f"Bundled repo data: {DEFAULT_DATA_FILE.name}"
     else:
         raw_df = None
         data_name = None
 except Exception as exc:
-    st.error("Could not read the intake CSV.")
+    st.error("Could not read the intake CSV from upload, DATA_URL, or bundled repo file.")
     st.exception(exc)
     st.stop()
 
-if not isinstance(raw_df, pd.DataFrame):
-    st.warning("Upload an intake CSV or place Application Data 2025_2026.csv in the same folder as app.py.")
+if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
+    st.error(
+        "No intake data found. For live deployment, either push Application Data 2025_2026.csv "
+        "to the GitHub repo, or set DATA_URL in Streamlit secrets."
+    )
     st.stop()
 
 st.sidebar.success(f"Loaded: {data_name} | Rows: {len(raw_df):,}")
@@ -1557,26 +1636,15 @@ if missing_base or missing_scen:
     st.stop()
 
 st.subheader(f"Active comparison: Baseline vs {active_name} | Population: {analysis_population}")
-st.dataframe(pd.DataFrame({"saved_scenario": list(scenarios.keys())}), use_container_width=True, hide_index=True)
+display_table(pd.DataFrame({"saved_scenario": list(scenarios.keys())}), use_container_width=True, hide_index=True)
 
 st.header("Public / Private University and TVET Split")
 st.caption("This separates results into public universities, private/other universities, and TVET. Institutions not in the public-university list are shown as Private University / Other for review.")
 sector_summary = compare_student_aggregates(base_df, scen_df, ["education_track", "ownership_group"])
 if not sector_summary.empty:
-    st.dataframe(style_table(sector_summary), use_container_width=True, hide_index=True)
+    display_table(style_table(sector_summary), use_container_width=True, hide_index=True)
 else:
     st.info("Sector summary could not be computed.")
-
-with st.expander("Institution classification check"):
-    inst_check_col = institution_col(scen_df)
-    if inst_check_col:
-        check_tbl = (
-            scen_df[[inst_check_col, "education_track", "ownership_group"]]
-            .drop_duplicates()
-            .sort_values(["ownership_group", inst_check_col])
-        )
-        st.caption("Use this to verify whether an institution is being classified as Public University, Private University / Other, or TVET.")
-        st.dataframe(check_tbl, use_container_width=True, hide_index=True)
 
 st.header("Baseline vs Scenario Diagnostics")
 try:
@@ -1617,7 +1685,7 @@ agg_compare = safe_compare_aggregate_outputs(baseline, scenario)
 if agg_compare.empty:
     st.error("Could not build aggregate comparison from baseline/scenario outputs.")
     st.stop()
-st.dataframe(style_indexed(agg_compare), use_container_width=True)
+display_table(style_indexed(agg_compare), use_container_width=True)
 
 st.subheader("Headline fiscal shifts")
 headline_rows = []
@@ -1626,7 +1694,7 @@ for label, metric in [("HH change", "HH"), ("Scholarship change", "SS"), ("Loan 
         headline_rows.append({"Measure": label, "Change_KSh": fmt_ksh(agg_compare.loc[metric, "change"])})
 headline_df = pd.DataFrame(headline_rows)
 if not headline_df.empty:
-    st.dataframe(headline_df, use_container_width=True, hide_index=True)
+    display_table(headline_df, use_container_width=True, hide_index=True)
 
 
 st.header("Policy Safety and Transmission Dashboard")
@@ -1639,12 +1707,26 @@ if fs_summary:
     f4.metric("Gov tuition saving", fmt_ksh(fs_summary.get("government_tuition_saving", 0)))
     st.caption("Gov tuition saving is the negative of scholarship plus loan change. Positive saving means the scenario shifts tuition burden away from government financing.")
 if not fs_table.empty:
-    st.dataframe(style_table(fs_table), use_container_width=True, hide_index=True)
+    display_table(style_table(fs_table), hide_index=True)
+
+if get_mobile_view():
+    st.subheader("Executive scenario summary")
+    exec_rows = []
+    for metric in ["HH", "SS", "LL", "Upkeep", "TotalLoan_with_Upkeep"]:
+        if metric in agg_compare.index:
+            exec_rows.append({
+                "Measure": metric,
+                "Baseline": fmt_ksh(agg_compare.loc[metric, "baseline"]),
+                "Scenario": fmt_ksh(agg_compare.loc[metric, "scenario"]),
+                "Change": fmt_ksh(agg_compare.loc[metric, "change"]),
+            })
+    if exec_rows:
+        display_table(pd.DataFrame(exec_rows), hide_index=True)
 
 warning_df = policy_warning_table(base_df, scen_df, agg_compare, scenario_policy_current)
 if not warning_df.empty:
     st.subheader("Policy risk warnings")
-    st.dataframe(warning_df, use_container_width=True, hide_index=True)
+    display_table(warning_df, use_container_width=True, hide_index=True)
 else:
     st.success("No policy warning thresholds breached for this scenario.")
 
@@ -1652,7 +1734,7 @@ st.subheader("Winners and losers by allocation component")
 wl = winners_losers_summary(base_df, scen_df, ["HH", "SS", "LL", "Upkeep", "TotalLoan_with_Upkeep"], id_col="user_id")
 if not wl.empty:
     st.caption("For HH, increase means household pays more. For SS, LL and Upkeep, increase means the student receives more through that component.")
-    st.dataframe(style_table(wl), use_container_width=True, hide_index=True)
+    display_table(style_table(wl), use_container_width=True, hide_index=True)
 else:
     st.info("Winner/loser summary could not be computed.")
 
@@ -1660,7 +1742,7 @@ st.subheader("Programme cost band transmission")
 pc_band = programme_cost_band_summary(base_df, scen_df, id_col="user_id")
 if not pc_band.empty:
     st.caption("This traces whether the policy shock is coming from low-, middle-, or high-cost programmes.")
-    st.dataframe(style_table(pc_band), use_container_width=True, hide_index=True)
+    display_table(style_table(pc_band), use_container_width=True, hide_index=True)
 else:
     st.info("Programme cost band summary could not be computed.")
 st.header("University Allocation Change from Baseline")
@@ -1669,7 +1751,7 @@ scen_inst = safe_get(scenario, "institution") if isinstance(safe_get(scenario, "
 inst_change = compare_group(base_inst, scen_inst)
 if not inst_change.empty:
     sort_col = "SS_change" if "SS_change" in inst_change.columns else "program_cost_change" if "program_cost_change" in inst_change.columns else inst_change.columns[0]
-    st.dataframe(style_table(inst_change.sort_values(sort_col, ascending=False)), use_container_width=True)
+    display_table(style_table(inst_change.sort_values(sort_col, ascending=False)), use_container_width=True)
 else:
     st.info("Institution-level allocation change is not available.")
 
@@ -1683,7 +1765,7 @@ if "MTI_final" in base_df.columns and "MTI_final" in scen_df.columns:
 else:
     st.warning("MTI_final is missing, so MTI distribution cannot be displayed.")
 st.subheader("MTI Distribution Summary")
-st.dataframe(style_indexed(dist_compare), use_container_width=True)
+display_table(style_indexed(dist_compare), use_container_width=True)
 
 st.subheader("MTI Class Frequencies and Cumulative Frequency")
 freq_base = safe_mti_frequency(base_df).rename(columns={"students": "baseline_students", "frequency_share": "baseline_frequency_share", "cumulative_students": "baseline_cumulative_students", "cumulative_share": "baseline_cumulative_share"})
@@ -1691,7 +1773,7 @@ freq_scen = safe_mti_frequency(scen_df).rename(columns={"students": "scenario_st
 freq_compare = freq_base.merge(freq_scen, on="MTI_class", how="outer")
 freq_compare["student_change"] = freq_compare["scenario_students"].fillna(0) - freq_compare["baseline_students"].fillna(0)
 freq_compare["cumulative_student_change"] = freq_compare["scenario_cumulative_students"].fillna(0) - freq_compare["baseline_cumulative_students"].fillna(0)
-st.dataframe(style_table(freq_compare), use_container_width=True, hide_index=True)
+display_table(style_table(freq_compare), use_container_width=True, hide_index=True)
 
 st.subheader("MTI Transition Matrix: Baseline Class to Scenario Class")
 transition_counts, transition_shares, movement_summary, transition_records = safe_mti_transition(base_df, scen_df, id_col="user_id")
@@ -1701,13 +1783,13 @@ with tc1:
     st.pyplot(plot_transition_heatmap(transition_counts), use_container_width=True)
 with tc2:
     st.caption("Rows are baseline MTI classes. Columns are scenario MTI classes. Diagonal cells stayed in the same class.")
-    st.dataframe(transition_counts, use_container_width=True)
+    display_table(transition_counts, use_container_width=True)
 with tc3:
     st.caption("Each row sums to 100% where students existed in that baseline class.")
-    st.dataframe(transition_shares.applymap(fmt_share), use_container_width=True)
+    display_table(transition_shares.applymap(fmt_share), use_container_width=True)
 with tc4:
     st.caption("Moved up means the student shifted to a higher MTI score; moved down means the scenario reduced the MTI score.")
-    st.dataframe(style_table(movement_summary), use_container_width=True, hide_index=True)
+    display_table(style_table(movement_summary), use_container_width=True, hide_index=True)
 
 st.header("MTI Component Score Distributions - Smooth Densities")
 score_components = ["S_primary", "S_secondary", "S_poverty", "S_family", "MTI_baseline", "MTI_after_equity", "MTI_final", "IncomeAdjustmentRatio"]
@@ -1717,7 +1799,7 @@ if available_components:
     show_distribution_pair(base_df[selected_score], scen_df[selected_score], selected_score, "Score", f"{selected_score} Change", money=False)
     comp_summary = component_summary(base_df, scen_df, available_components)
     st.subheader("Component Summary with Mean, Median, Min and Max")
-    st.dataframe(style_table(comp_summary), use_container_width=True)
+    display_table(style_table(comp_summary), use_container_width=True)
 else:
     comp_summary = pd.DataFrame()
     st.info("No MTI component columns found.")
@@ -1725,7 +1807,7 @@ else:
 st.header("Allocation Diagnostics: Student-Level Statistics")
 allocation_stats = allocation_policy_stats(base_df, scen_df, ["HH", "SS", "LL", "Upkeep", "TotalLoan_with_Upkeep", "SS_gap_share", "LL_gap_share"])
 st.caption("This table shows who is getting the least and most, and how the scenario changes the distribution. Min/max are student-level extremes, not averages.")
-st.dataframe(style_table(allocation_stats), use_container_width=True, hide_index=True)
+display_table(style_table(allocation_stats), use_container_width=True, hide_index=True)
 
 with st.expander("Show students at allocation extremes"):
     ext_component = st.selectbox("Allocation extreme component", [c for c in ["HH", "SS", "LL", "Upkeep", "TotalLoan_with_Upkeep"] if c in base_df.columns and c in scen_df.columns])
@@ -1733,7 +1815,7 @@ with st.expander("Show students at allocation extremes"):
     e_tabs = st.tabs(["Lowest scenario", "Highest scenario", "Largest increase", "Largest decrease"])
     for tab, key in zip(e_tabs, ["lowest_scenario", "highest_scenario", "largest_increase", "largest_decrease"]):
         with tab:
-            st.dataframe(style_table(extreme_sets.get(key, pd.DataFrame())), use_container_width=True, hide_index=True)
+            display_table(style_table(extreme_sets.get(key, pd.DataFrame())), use_container_width=True, hide_index=True)
 
 st.header("Allocation Distributions - Smooth Densities")
 alloc_options = [c for c in ["HH", "SS", "LL", "Upkeep", "TotalLoan_with_Upkeep", "SS_gap_share", "LL_gap_share"] if c in base_df.columns and c in scen_df.columns]
@@ -1755,20 +1837,20 @@ with seg_tabs[2]:
 st.header("Institution, Programme and County Effects")
 tab1, tab2, tab3 = st.tabs(["Institution", "Programme", "County"])
 with tab1:
-    st.dataframe(style_table(scen_inst.sort_values("program_cost", ascending=False)) if not scen_inst.empty and "program_cost" in scen_inst.columns else scen_inst, use_container_width=True)
+    display_table(style_table(scen_inst.sort_values("program_cost", ascending=False)) if not scen_inst.empty and "program_cost" in scen_inst.columns else scen_inst, use_container_width=True)
 with tab2:
     prog = safe_get(scenario, "programme") if isinstance(safe_get(scenario, "programme"), pd.DataFrame) else pd.DataFrame()
-    st.dataframe(style_table(prog.sort_values("program_cost", ascending=False)) if not prog.empty and "program_cost" in prog.columns else prog, use_container_width=True)
+    display_table(style_table(prog.sort_values("program_cost", ascending=False)) if not prog.empty and "program_cost" in prog.columns else prog, use_container_width=True)
 with tab3:
     county = safe_get(scenario, "county") if isinstance(safe_get(scenario, "county"), pd.DataFrame) else pd.DataFrame()
-    st.dataframe(style_table(county.sort_values("program_cost", ascending=False)) if not county.empty and "program_cost" in county.columns else county, use_container_width=True)
+    display_table(style_table(county.sort_values("program_cost", ascending=False)) if not county.empty and "program_cost" in county.columns else county, use_container_width=True)
 
 st.header("Student-Level Scenario Impact")
 try:
     student_changes = compare_student_level(baseline, scenario, id_col="user_id")
 except Exception:
     student_changes = aligned_student_frames(base_df, scen_df, id_col="user_id")
-st.dataframe(style_table(student_changes.head(1000)), use_container_width=True)
+display_table(style_table(student_changes.head(1000)), use_container_width=True)
 
 st.header("Download Outputs")
 d1, d2, d3, d4 = st.columns(4)
