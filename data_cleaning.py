@@ -28,6 +28,17 @@ Why this matters:
 import pandas as pd
 import numpy as np
 
+def safe_series(df, col, default=0):
+    """
+    Return df[col] if it exists, otherwise a Series filled with default.
+    Prevents errors like: int object has no attribute fillna.
+    """
+    if isinstance(df, pd.DataFrame) and col in df.columns:
+        return df[col]
+    return pd.Series(default, index=df.index)
+
+
+
 
 # =====================================================
 # TEXT CLEANING
@@ -117,8 +128,8 @@ def clean_application_data(df, policy):
     Self-declared income is ignored (unreliable).
     """
 
-    df["KRAIncomeEmploymentCombined"] = df.get("KRAIncomeEmploymentCombined", 0).fillna(0)
-    df["KRAIncomeBusinessCombined"] = df.get("KRAIncomeBusinessCombined", 0).fillna(0)
+    df["KRAIncomeEmploymentCombined"] = safe_series(df, "KRAIncomeEmploymentCombined", 0).fillna(0)
+    df["KRAIncomeBusinessCombined"] = safe_series(df, "KRAIncomeBusinessCombined", 0).fillna(0)
 
     df["VerifiedAnnualHouseholdIncome"] = (
         df["KRAIncomeEmploymentCombined"]
@@ -132,9 +143,9 @@ def clean_application_data(df, policy):
     These bounds prevent unrealistic values from distorting MTI.
     """
 
-    df["NumberofChildren"] = df.get("NumberofChildren", 0).fillna(0).clip(0, 10)
-    df["SiblingsHigherEduc"] = df.get("SiblingsHigherEduc", 0).fillna(0).clip(0, 5)
-    df["PovertyIndex"] = df.get("PovertyIndex", 0).fillna(0).clip(0, 100)
+    df["NumberofChildren"] = safe_series(df, "NumberofChildren", 0).fillna(0).clip(0, 10)
+    df["SiblingsHigherEduc"] = safe_series(df, "SiblingsHigherEduc", 0).fillna(0).clip(0, 5)
+    df["PovertyIndex"] = safe_series(df, "PovertyIndex", 0).fillna(0).clip(0, 100)
 
     # ---------------------------------------------
     # 5. PROGRAM COST
