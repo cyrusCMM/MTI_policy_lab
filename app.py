@@ -111,6 +111,19 @@ def style_table(df):
     return out
 
 
+@st.cache_data(show_spinner=False)
+def load_csv_path_cached(path_str):
+    """Cache default repo CSV loading across reruns."""
+    return pd.read_csv(path_str)
+
+
+@st.cache_data(show_spinner=False)
+def load_csv_url_cached(url):
+    """Cache URL/secret CSV loading across reruns."""
+    return pd.read_csv(url)
+
+
+
 def fresh_policy():
     p = get_policy()
     if not isinstance(p, dict):
@@ -785,6 +798,24 @@ def add_track_and_ownership(df):
     return out
 
 
+@st.cache_data(show_spinner=False, max_entries=12)
+def prepare_data_cached(raw_df, policy):
+    """
+    Cached data preparation pipeline.
+
+    This is the expensive repeated step:
+    raw data -> cleaning -> fee mapping -> public/private/TVET classification.
+
+    It does NOT change MTI or allocation logic. It only avoids re-running
+    the same preparation work on every Streamlit rerun.
+    """
+    clean = clean_application_data(raw_df, policy)
+    mapped = apply_fee_mapping(clean)
+    classified = add_track_and_ownership(mapped)
+    return classified
+
+
+
 def aggregate_student_level(df, group_cols):
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
@@ -916,14 +947,12 @@ ANALYSIS_POPULATION_OPTIONS = [
 
 def filter_analysis_population_from_raw(raw_df, policy, selected_population):
     """
-    Clean + fee-map raw data, classify education track/ownership, then filter
+    Prepare and classify data once through the cached pipeline, then filter
     BEFORE baseline/scenario is run. This guarantees that baseline, scenario,
     distributions, transitions, totals and downloads all refer to the same
     selected analysis population.
     """
-    clean = clean_application_data(raw_df, policy)
-    mapped = apply_fee_mapping(clean)
-    classified = add_track_and_ownership(mapped)
+    classified = prepare_data_cached(raw_df, policy).copy()
 
     if selected_population == "All":
         filtered = classified.copy()
@@ -947,9 +976,7 @@ def filter_analysis_population_from_raw(raw_df, policy, selected_population):
 def population_counts_from_raw(raw_df, policy):
     """Counts used only to guide the user before running baseline."""
     try:
-        clean = clean_application_data(raw_df, policy)
-        mapped = apply_fee_mapping(clean)
-        classified = add_track_and_ownership(mapped)
+        classified = prepare_data_cached(raw_df, policy)
         return {
             "All": len(classified),
             "Universities only": int(classified["education_track"].eq("University").sum()),
@@ -1307,10 +1334,10 @@ try:
         raw_df = pd.read_csv(uploaded_file)
         data_name = f"Uploaded file: {uploaded_file.name}"
     elif DATA_URL:
-        raw_df = pd.read_csv(DATA_URL)
+        raw_df = load_csv_url_cached(DATA_URL)
         data_name = "Live data from configured DATA_URL"
     elif DEFAULT_DATA_FILE.exists():
-        raw_df = pd.read_csv(DEFAULT_DATA_FILE)
+        raw_df = load_csv_path_cached(str(DEFAULT_DATA_FILE))
         data_name = f"Bundled repo data: {DEFAULT_DATA_FILE.name}"
     else:
         raw_df = None
@@ -1415,6 +1442,11 @@ with cb:
     if st.button("Clear all"):
         reset_all()
         st.rerun()
+
+if st.sidebar.button("Clear cached data"):
+    st.cache_data.clear()
+    reset_all()
+    st.rerun()
 
 old_policy = copy.deepcopy(safe_session_policy())
 scenario_policy = deep_merge_policy(fresh_policy(), old_policy)
