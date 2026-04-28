@@ -32,9 +32,12 @@ BASE_POLICY = {
 
     # Household-size score bands.
     "family_scores": {
-        "small": 9.3,    # 1-3 members
-        "medium": 16.4,  # 4-6 members
-        "large": 20.9,   # 7+ members
+        "method": "linear",
+        "max_score": 20.9,
+        "fmax": 7,
+        "small": 9.3,
+        "medium": 16.4,
+        "large": 20.9,
     },
 
     # Data availability audit for document levers.
@@ -71,9 +74,10 @@ BASE_POLICY = {
     # an equity adjustment has already been applied, unless policy is changed.
     "income_adjustment": {
         "enabled": True,
-        "threshold": 1_200_000,
-        "k": 3,
+        "threshold": 399_996,
+        "k": 24,
         "lambda": 0.20,
+        "curve": "smoothstep",
         "exclude_equity_adjusted": True,
     },
 
@@ -90,22 +94,21 @@ BASE_POLICY = {
         "hh_increase_share_warning": 0.40,
     },
     "university_allocation": {
-        # HH = min{HH_intercept + HH_coefficient*x, PC}
-        # Baseline equivalent: min{150000(1 - 0.90x), PC}
-        "hh_intercept_mode": "fixed_amount",
+        "hh_formula": "ability_share_cap",
+        "hh_min_share": 0.10,
+        "hh_ability_share": 0.40,
+        "hh_cap": 150000,
+
+        "hh_intercept_mode": "ability_share_cap",
         "hh_intercept_amount": 150000,
         "hh_coefficient": -135000,
 
-        # SS = R * (ss_intercept + ss_coefficient*x)
         "ss_intercept": 0.15,
         "ss_coefficient": 0.40,
 
-        # Loan parameters are derived for validation/explanation only.
-        # The allocation engine should compute LL as residual: LL = R - SS.
         "ll_intercept": 0.85,
         "ll_coefficient": -0.40,
 
-        # U = upkeep_intercept + upkeep_coefficient*x
         "upkeep_intercept": 40000,
         "upkeep_coefficient": 20000,
     },
@@ -150,7 +153,9 @@ def validate_policy(policy):
         "weight_sum": weight_sum,
         "weights_sum_to_100": abs(weight_sum - 100) < 1e-6,
         "family_weight_non_negative": policy["weights"].get("family", 0) >= 0,
-        "hh_intercept_mode_valid": uni["hh_intercept_mode"] in ["fixed_amount", "programme_cost"],
+        "hh_intercept_mode_valid": uni.get("hh_intercept_mode") in ["fixed_amount", "programme_cost", "ability_share_cap"],
+        "family_scoring_valid": policy.get("family_scores", {}).get("fmax", 0) > 0 and policy.get("family_scores", {}).get("max_score", 0) >= 0,
+        "hh_ability_formula_valid": uni.get("hh_min_share", 0) >= 0 and uni.get("hh_ability_share", 0) >= 0 and uni.get("hh_cap", 0) >= 0,
         "university_ss_share_valid_for_x_0_to_1": uni_ss_min >= 0 and uni_ss_max <= 1,
         "university_allocation_identity_coefficients": (
             abs(uni["ss_intercept"] + uni["ll_intercept"] - 1.0) < 1e-6

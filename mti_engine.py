@@ -200,22 +200,48 @@ def compute_poverty_score(df, policy):
 # =====================================================
 
 def compute_family_score(df, policy):
-    """Family score bands: 1-3, 4-6, 7+."""
+    """
+    Family score.
+
+    Default policy:
+        S_family = max_score * min(1, HouseholdSize / Fmax)
+
+    This replaces the older step-band approach and gives a smooth,
+    transparent marginal increase for each additional household member.
+    """
     df = df.copy()
-    fam = policy["family_scores"]
+    fam = policy.get("family_scores", {})
+    method = str(fam.get("method", "linear")).lower()
 
-    df["S_family"] = np.select(
-        [
-            df["HouseholdSize"] <= 3,
-            (df["HouseholdSize"] >= 4) & (df["HouseholdSize"] <= 6),
-            df["HouseholdSize"] >= 7,
-        ],
-        [fam["small"], fam["medium"], fam["large"]],
-        default=fam["small"],
-    )
+    household_size = pd.to_numeric(df["HouseholdSize"], errors="coerce").fillna(1).clip(lower=1)
 
-    df["S_family"] = pd.to_numeric(df["S_family"], errors="coerce").fillna(fam["small"])
+    if method == "linear":
+        max_score = float(fam.get("max_score", policy.get("weights", {}).get("family", 20.9)))
+        fmax = max(float(fam.get("fmax", 7)), 1.0)
+        df["S_family"] = max_score * np.minimum(1.0, household_size / fmax)
+    elif method == "log":
+        max_score = float(fam.get("max_score", policy.get("weights", {}).get("family", 20.9)))
+        fmax = max(float(fam.get("fmax", 7)), 2.0)
+        df["S_family"] = max_score * np.minimum(1.0, np.log(household_size) / np.log(fmax))
+    else:
+        df["S_family"] = np.select(
+            [
+                household_size <= 3,
+                (household_size >= 4) & (household_size <= 6),
+                household_size >= 7,
+            ],
+            [
+                float(fam.get("small", 9.3)),
+                float(fam.get("medium", 16.4)),
+                float(fam.get("large", 20.9)),
+            ],
+            default=float(fam.get("small", 9.3)),
+        )
+
+    max_allowed = float(fam.get("max_score", policy.get("weights", {}).get("family", 20.9)))
+    df["S_family"] = pd.to_numeric(df["S_family"], errors="coerce").fillna(0).clip(0, max_allowed)
     return df
+
 
 
 # =====================================================
@@ -290,12 +316,23 @@ def apply_equity_adjustment(df, policy):
 # =====================================================
 
 def apply_income_adjustment(df, policy):
-    """MTI_final = M * [1 - lambda * adjustment_ratio]."""
+    """
+    Income adjustment.
+
+    M = MTI after baseline and equity adjustment.
+    T_IPH = income per household-member threshold.
+    k = income scaling factor.
+    U_IPH = k * T_IPH.
+    z = min(1, max(0, (IPH - T_IPH) / ((k - 1) * T_IPH)))
+    adjustment_ratio = 3z^2 - 2z^3
+    MTI_final = M * [1 - lambda * adjustment_ratio]
+    """
     df = df.copy()
     inc = policy["income_adjustment"]
 
     df["MTI_final"] = df["MTI_after_equity"]
     df["IncomeAdjustmentRatio"] = 0.0
+    df["IncomeSmoothZ"] = 0.0
     df["income_adjustment_applied"] = 0
 
     if not inc.get("enabled", False):
@@ -311,14 +348,20 @@ def apply_income_adjustment(df, policy):
     lam = float(inc["lambda"])
 
     if T <= 0:
-        raise ValueError("Income threshold must be positive.")
+        raise ValueError("Income threshold T_IPH must be positive.")
     if k <= 1:
         raise ValueError("Income scaling factor k must be greater than 1.")
     if not (0 <= lam <= 1):
         raise ValueError("Income lambda must be between 0 and 1.")
 
-    ratio = ((df["IPH"] - T) / ((k - 1) * T)).clip(0, 1).fillna(0)
-    df["IncomeAdjustmentRatio"] = ratio
+    z = ((df["IPH"] - T) / ((k - 1) * T)).clip(0, 1).fillna(0)
+    if str(inc.get("curve", "smoothstep")).lower() == "linear":
+        adjustment_ratio = z
+    else:
+        adjustment_ratio = 3 * (z ** 2) - 2 * (z ** 3)
+
+    df["IncomeSmoothZ"] = z
+    df["IncomeAdjustmentRatio"] = adjustment_ratio
 
     mask = df["VerifiedAnnualHouseholdIncome"] > 0
     if inc.get("exclude_equity_adjusted", True):
@@ -329,6 +372,7 @@ def apply_income_adjustment(df, policy):
 
     df["MTI_final"] = df["MTI_final"].clip(0, 100)
     return df
+
 
 
 # =====================================================

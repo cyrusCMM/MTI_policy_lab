@@ -27,60 +27,58 @@ def compute_university_allocation(df, policy, mti_col="MTI_final"):
     University allocation.
 
     x = MTI / 100
+    ability = (100 - MTI) / 100 = 1 - x
+    P = Programme Cost
 
-    HH = min{HH_intercept + HH_coefficient*x, PC}
+    HH_raw = P * (hh_min_share + hh_ability_share * ability)
+    HH = min(hh_cap, HH_raw, P)
 
-    R = PC - HH
-
-    SS = R * (SS_intercept + SS_coefficient*x)
-
+    R = P - HH
+    SS = R * (ss_intercept + ss_coefficient*x)
     LL = R - SS
-
-    Upkeep = Upkeep_intercept + Upkeep_coefficient*x
+    Upkeep = upkeep_intercept + upkeep_coefficient*x
     """
 
     df = df.copy()
     p = policy["university_allocation"]
 
     x = df[mti_col].clip(0, 100) / 100
-    PC = df["ProgramCost"]
+    PC = pd.to_numeric(df["ProgramCost"], errors="coerce").fillna(0)
+    ability = 1 - x
 
-    if p["hh_intercept_mode"] == "programme_cost":
-        hh_intercept = PC
+    formula = str(p.get("hh_formula", p.get("hh_intercept_mode", "ability_share_cap"))).lower()
+
+    if formula == "ability_share_cap":
+        min_share = float(p.get("hh_min_share", 0.10))
+        ability_share = float(p.get("hh_ability_share", 0.40))
+        hh_cap = float(p.get("hh_cap", p.get("hh_intercept_amount", 150000)))
+        df["HH_raw"] = PC * (min_share + ability_share * ability)
+        df["HH"] = np.minimum(np.minimum(df["HH_raw"], hh_cap), PC)
     else:
-        hh_intercept = p["hh_intercept_amount"]
+        if p.get("hh_intercept_mode") == "programme_cost":
+            hh_intercept = PC
+        else:
+            hh_intercept = p.get("hh_intercept_amount", 150000)
+        df["HH_raw"] = hh_intercept + p.get("hh_coefficient", -135000) * x
+        df["HH"] = np.minimum(df["HH_raw"], PC)
 
-    df["HH"] = hh_intercept + p["hh_coefficient"] * x
-    df["HH"] = np.minimum(df["HH"], PC)
     df["HH"] = df["HH"].clip(lower=0)
-
     df["FinancingGap"] = PC - df["HH"]
 
-    df["SS_gap_share_raw"] = (
-        p["ss_intercept"] + p["ss_coefficient"] * x
-    )
-
+    df["SS_gap_share_raw"] = p["ss_intercept"] + p["ss_coefficient"] * x
     df["SS_gap_share"] = df["SS_gap_share_raw"].clip(0, 1)
-
     df["SS"] = df["FinancingGap"] * df["SS_gap_share"]
 
-    # CRITICAL: loan is residual
     df["LL"] = df["FinancingGap"] - df["SS"]
     df["LL"] = df["LL"].clip(lower=0)
 
-    df["LL_gap_share"] = np.where(
-        df["FinancingGap"] > 0,
-        df["LL"] / df["FinancingGap"],
-        0
-    )
+    df["LL_gap_share"] = np.where(df["FinancingGap"] > 0, df["LL"] / df["FinancingGap"], 0)
 
-    df["Upkeep"] = (
-        p["upkeep_intercept"] + p["upkeep_coefficient"] * x
-    ).clip(lower=0)
-
+    df["Upkeep"] = (p["upkeep_intercept"] + p["upkeep_coefficient"] * x).clip(lower=0)
     df["PC_allocation"] = PC
 
     return df
+
 
 
 def compute_tvet_allocation(df, policy, mti_col="MTI_final"):

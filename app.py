@@ -178,6 +178,9 @@ def deep_merge_policy(default_policy, user_policy):
     thresholds.setdefault("poverty_score", 0.60)
 
     family_scores = ensure_section("family_scores")
+    family_scores.setdefault("method", "linear")
+    family_scores.setdefault("max_score", 20.9)
+    family_scores.setdefault("fmax", 7)
     family_scores.setdefault("small", 9.3)
     family_scores.setdefault("medium", 16.4)
     family_scores.setdefault("large", 20.9)
@@ -191,12 +194,18 @@ def deep_merge_policy(default_policy, user_policy):
 
     inc = ensure_section("income_adjustment")
     inc.setdefault("enabled", True)
-    inc.setdefault("threshold", 1200000)
-    inc.setdefault("k", 3)
+    inc.setdefault("threshold", 399996)
+    inc.setdefault("k", 24)
     inc.setdefault("lambda", 0.20)
+    inc.setdefault("curve", "smoothstep")
+    inc.setdefault("exclude_equity_adjusted", True)
 
     uni = ensure_section("university_allocation")
-    uni.setdefault("hh_intercept_mode", "fixed_amount")
+    uni.setdefault("hh_formula", "ability_share_cap")
+    uni.setdefault("hh_min_share", 0.10)
+    uni.setdefault("hh_ability_share", 0.40)
+    uni.setdefault("hh_cap", 150000)
+    uni.setdefault("hh_intercept_mode", "ability_share_cap")
     uni.setdefault("hh_intercept_amount", 150000)
     uni.setdefault("hh_coefficient", -135000)
     uni.setdefault("ss_intercept", 0.15)
@@ -724,8 +733,8 @@ def policy_warning_table(base_df, scen_df, agg_compare, scenario_policy):
         share_inc = (ch > 0).mean()
         if share_inc > float(safety.get("hh_increase_share_warning", 0.40)):
             warnings.append({"level": "Medium", "warning": "Large share of students have increased HH", "value": fmt_share(share_inc), "policy_meaning": "Policy shifts burden to many households."})
-    if ua.get("hh_intercept_mode") == "programme_cost" and not safety.get("enabled", False):
-        warnings.append({"level": "Medium", "warning": "Programme-cost HH mode without HH safety cap", "value": "No cap", "policy_meaning": "HH scales with programme cost and may create high-cost programme shocks."})
+    if ua.get("hh_formula") == "ability_share_cap" and ua.get("hh_cap", 0) <= 0:
+        warnings.append({"level": "High", "warning": "HH formula has no positive cap", "value": "No cap", "policy_meaning": "Household contribution may become excessive for high-cost programmes."})
     return pd.DataFrame(warnings)
 
 # =====================================================
@@ -1201,7 +1210,7 @@ def show_baseline_only_dashboard(baseline, analysis_population):
     st.dataframe(style_table(freq_base), use_container_width=True, hide_index=True)
 
     st.subheader("Baseline MTI component statistics")
-    score_components = ["S_primary", "S_secondary", "S_poverty", "S_family", "MTI_baseline", "MTI_after_equity", "MTI_final", "IncomeAdjustmentRatio"]
+    score_components = ["S_primary", "S_secondary", "S_poverty", "S_family", "MTI_baseline", "MTI_after_equity", "MTI_final", "IncomeSmoothZ", "IncomeAdjustmentRatio"]
     available_components = [c for c in score_components if c in base_df.columns]
     comp_base = baseline_component_summary(base_df, available_components)
     if not comp_base.empty:
@@ -1467,10 +1476,22 @@ with st.sidebar.form("scenario_form"):
     scenario_policy["thresholds"]["primary_poverty"] = st.slider("Primary poverty threshold", 0.10, 1.00, float(old_policy.get("thresholds", {}).get("primary_poverty", 0.40)), 0.01)
     scenario_policy["thresholds"]["poverty_score"] = st.slider("Poverty score threshold", 0.10, 1.00, float(old_policy.get("thresholds", {}).get("poverty_score", 0.60)), 0.01)
 
-    st.subheader("5. Family Scores")
-    scenario_policy["family_scores"]["small"] = st.number_input("Family score: 1-3", 0.0, 50.0, float(old_policy.get("family_scores", {}).get("small", 9.3)), 0.1)
-    scenario_policy["family_scores"]["medium"] = st.number_input("Family score: 4-6", 0.0, 50.0, float(old_policy.get("family_scores", {}).get("medium", 16.4)), 0.1)
-    scenario_policy["family_scores"]["large"] = st.number_input("Family score: 7+", 0.0, 50.0, float(old_policy.get("family_scores", {}).get("large", 20.9)), 0.1)
+    st.subheader("5. Family Score")
+    fam_old = old_policy.get("family_scores") if isinstance(old_policy.get("family_scores"), dict) else {}
+    scenario_policy["family_scores"]["method"] = "linear"
+    scenario_policy["family_scores"]["max_score"] = st.number_input(
+        "Family maximum score",
+        0.0, 50.0,
+        float(fam_old.get("max_score", fam_old.get("large", 20.9))),
+        0.1
+    )
+    scenario_policy["family_scores"]["fmax"] = st.number_input(
+        "Family size cap Fmax",
+        1, 30,
+        int(fam_old.get("fmax", 7)),
+        1
+    )
+    st.caption("Family equation: S_family = max_score × min(1, HouseholdSize / Fmax).")
 
     st.subheader("6. Equity Adjustment")
     eq = scenario_policy["equity_adjustment"]
@@ -1485,23 +1506,33 @@ with st.sidebar.form("scenario_form"):
     st.subheader("7. Income Adjustment")
     inc = scenario_policy["income_adjustment"]
     old_inc = old_policy.get("income_adjustment") if isinstance(old_policy.get("income_adjustment"), dict) else {}
-    inc["enabled"] = st.checkbox("Enable income adjustment", value=bool(old_inc["enabled"]))
-    inc["threshold"] = st.number_input("Income threshold T", 0, 10000000, int(old_inc.get("threshold", 1200000)), 50000)
-    inc["k"] = st.slider("Income scaling factor k", 1.1, 10.0, float(old_inc.get("k", 3)), 0.1)
-    inc["lambda"] = st.slider("Maximum income lambda", 0.0, 0.50, float(old_inc.get("lambda", 0.20)), 0.01)
+    inc["enabled"] = st.checkbox("Enable income adjustment", value=bool(old_inc.get("enabled", True)))
+    inc["threshold"] = st.number_input("Income per household threshold T_IPH", 0, 2000000, int(old_inc.get("threshold", 399996)), 1000)
+    inc["k"] = st.slider("Income scaling factor k", 1.1, 50.0, float(old_inc.get("k", 24)), 0.1)
+    inc["lambda"] = st.slider("Maximum income lambda λ", 0.0, 0.50, float(old_inc.get("lambda", 0.20)), 0.01)
+    inc["curve"] = st.selectbox("Income adjustment curve", ["smoothstep", "linear"], index=0 if old_inc.get("curve", "smoothstep") == "smoothstep" else 1)
+    inc["exclude_equity_adjusted"] = st.checkbox("Exclude equity-adjusted students from income adjustment", value=bool(old_inc.get("exclude_equity_adjusted", True)))
+    st.caption("Income equation: z = min(1, max(0, (IPH - T_IPH) / ((k - 1)T_IPH))); M_final = M × [1 - λ(3z² - 2z³)].")
 
     st.subheader("8. University Allocation")
     ua = scenario_policy["university_allocation"]
     old_ua = old_policy.get("university_allocation") if isinstance(old_policy.get("university_allocation"), dict) else {}
-    ua["hh_intercept_mode"] = st.selectbox("HH intercept mode", ["fixed_amount", "programme_cost"], index=["fixed_amount", "programme_cost"].index(old_ua.get("hh_intercept_mode", "fixed_amount") if old_ua.get("hh_intercept_mode", "fixed_amount") in ["fixed_amount", "programme_cost"] else "fixed_amount"))
-    ua["hh_intercept_amount"] = st.number_input("HH intercept amount", 0, 1000000, int(old_ua.get("hh_intercept_amount", 150000)), 5000)
-    ua["hh_coefficient"] = st.number_input("HH coefficient on MTI x", -1000000, 1000000, int(old_ua.get("hh_coefficient", -135000)), 5000)
+
+    ua["hh_formula"] = "ability_share_cap"
+    ua["hh_intercept_mode"] = "ability_share_cap"
+    ua["hh_min_share"] = st.slider("HH minimum programme-cost share", 0.0, 1.0, float(old_ua.get("hh_min_share", 0.10)), 0.01)
+    ua["hh_ability_share"] = st.slider("HH ability-based additional share", 0.0, 1.0, float(old_ua.get("hh_ability_share", 0.40)), 0.01)
+    ua["hh_cap"] = st.number_input("HH cap", 0, 1000000, int(old_ua.get("hh_cap", old_ua.get("hh_intercept_amount", 150000))), 5000)
+    ua["hh_intercept_amount"] = ua["hh_cap"]
+    ua["hh_coefficient"] = -135000
+
     ua["ss_intercept"] = st.slider("Scholarship intercept", 0.0, 1.0, float(old_ua.get("ss_intercept", 0.15)), 0.01)
     ua["ss_coefficient"] = st.slider("Scholarship coefficient on MTI x", -1.0, 1.0, float(old_ua.get("ss_coefficient", 0.40)), 0.01)
     ua["ll_intercept"] = 1 - ua["ss_intercept"]
     ua["ll_coefficient"] = -ua["ss_coefficient"]
     ua["upkeep_intercept"] = st.number_input("Upkeep intercept", 0, 200000, int(old_ua.get("upkeep_intercept", 40000)), 1000)
     ua["upkeep_coefficient"] = st.number_input("Upkeep coefficient on MTI x", -100000, 200000, int(old_ua.get("upkeep_coefficient", 20000)), 1000)
+    st.caption("HH equation: HH = min(HH cap, P × [minimum share + ability share × ((100 - MTI) / 100)], P). Then R = P - HH, SS = R × scholarship share, LL = R - SS.")
 
 
     st.subheader("8B. HH Safety / Hybrid Cap")
@@ -1512,7 +1543,7 @@ with st.sidebar.form("scenario_form"):
     hs["warning_threshold"] = st.number_input("HH warning threshold", 0, 1000000, int(old_hs.get("warning_threshold", 200000)), 5000)
     hs["hh_share_warning"] = st.slider("HH share warning threshold", 0.0, 1.0, float(old_hs.get("hh_share_warning", 0.50)), 0.01)
     hs["hh_increase_share_warning"] = st.slider("HH increase share warning threshold", 0.0, 1.0, float(old_hs.get("hh_increase_share_warning", 0.40)), 0.01)
-    st.caption("When enabled, university HH is capped after the selected HH formula: HH = min(HH_formula, HH safety cap, PC). Identity still holds because LL remains residual.")
+    st.caption("Main HH cap is now part of the HH equation above. This section remains as an additional diagnostic/backstop layer and warning system. Identity still holds because LL remains residual.")
     st.subheader("9. TVET Allocation")
     ta = scenario_policy["tvet_allocation"]
     old_ta = old_policy.get("tvet_allocation") if isinstance(old_policy.get("tvet_allocation"), dict) else {}
@@ -1532,6 +1563,10 @@ if create_scenario:
     errors = []
     if family_w < 0:
         errors.append("MTI weights exceed 100%.")
+    if ua.get("hh_min_share", 0) < 0 or ua.get("hh_ability_share", 0) < 0 or ua.get("hh_cap", 0) < 0:
+        errors.append("HH formula parameters cannot be negative.")
+    if ua.get("hh_min_share", 0) + ua.get("hh_ability_share", 0) > 1:
+        errors.append("HH minimum share plus ability share should not exceed 100% of programme cost before cap.")
     if ua["ss_intercept"] + ua["ss_coefficient"] < 0:
         errors.append("Scholarship share at MTI=100 cannot be negative.")
     if ua["ss_intercept"] + ua["ss_coefficient"] > 1:
@@ -1777,7 +1812,7 @@ with tc4:
     st.dataframe(style_table(movement_summary), use_container_width=True, hide_index=True)
 
 st.header("MTI Component Score Distributions - Smooth Densities")
-score_components = ["S_primary", "S_secondary", "S_poverty", "S_family", "MTI_baseline", "MTI_after_equity", "MTI_final", "IncomeAdjustmentRatio"]
+score_components = ["S_primary", "S_secondary", "S_poverty", "S_family", "MTI_baseline", "MTI_after_equity", "MTI_final", "IncomeSmoothZ", "IncomeAdjustmentRatio"]
 available_components = [c for c in score_components if c in base_df.columns and c in scen_df.columns]
 if available_components:
     selected_score = st.selectbox("Select MTI score/component", available_components)
