@@ -111,16 +111,44 @@ def style_table(df):
     return out
 
 
+
+def read_csv_robust(source):
+    """
+    Read CSV robustly across common encodings from Excel/Windows exports.
+    Handles UTF-8, UTF-8-SIG, CP1252 and Latin-1.
+    """
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
+    last_error = None
+
+    for enc in encodings:
+        try:
+            # UploadedFile objects need pointer reset between attempts.
+            if hasattr(source, "seek"):
+                source.seek(0)
+            return pd.read_csv(source, encoding=enc, low_memory=False)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+
+    # Final fallback: replace undecodable characters instead of crashing.
+    if hasattr(source, "seek"):
+        source.seek(0)
+    try:
+        return pd.read_csv(source, encoding="latin1", low_memory=False)
+    except Exception:
+        raise last_error
+
+
 @st.cache_data(show_spinner=False)
 def load_csv_path_cached(path_str):
     """Cache default repo CSV loading across reruns."""
-    return pd.read_csv(path_str)
+    return read_csv_robust(path_str)
 
 
 @st.cache_data(show_spinner=False)
 def load_csv_url_cached(url):
     """Cache URL/secret CSV loading across reruns."""
-    return pd.read_csv(url)
+    return read_csv_robust(url)
 
 
 
@@ -1340,7 +1368,7 @@ data_name = None
 
 try:
     if uploaded_file is not None:
-        raw_df = pd.read_csv(uploaded_file)
+        raw_df = read_csv_robust(uploaded_file)
         data_name = f"Uploaded file: {uploaded_file.name}"
     elif DATA_URL:
         raw_df = load_csv_url_cached(DATA_URL)
