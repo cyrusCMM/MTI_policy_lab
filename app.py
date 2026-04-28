@@ -112,44 +112,112 @@ def style_table(df):
 
 
 
+
+
 def read_csv_robust(source):
     """
     Read CSV robustly across common encodings from Excel/Windows exports.
-    Handles UTF-8, UTF-8-SIG, CP1252 and Latin-1.
     """
     encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
     last_error = None
-
     for enc in encodings:
         try:
-            # UploadedFile objects need pointer reset between attempts.
             if hasattr(source, "seek"):
                 source.seek(0)
             return pd.read_csv(source, encoding=enc, low_memory=False)
         except UnicodeDecodeError as exc:
             last_error = exc
             continue
-
-    # Final fallback: replace undecodable characters instead of crashing.
     if hasattr(source, "seek"):
         source.seek(0)
     try:
         return pd.read_csv(source, encoding="latin1", low_memory=False)
     except Exception:
-        raise last_error
+        if last_error is not None:
+            raise last_error
+        raise
 
 
 @st.cache_data(show_spinner=False)
 def load_csv_path_cached(path_str):
-    """Cache default repo CSV loading across reruns."""
     return read_csv_robust(path_str)
 
 
 @st.cache_data(show_spinner=False)
 def load_csv_url_cached(url):
-    """Cache URL/secret CSV loading across reruns."""
     return read_csv_robust(url)
 
+
+def stop_if_no_data(raw_df, data_name=None):
+    """
+    Strict data guard.
+
+    Important:
+    In normal Streamlit, st.stop() halts execution.
+    In bare Python/IPython mode, st.stop() may not halt cleanly, so we also raise RuntimeError.
+    This prevents NoneType errors such as .index, .shape, .empty, or len(None).
+    """
+    if raw_df is None:
+        msg = (
+            "No intake CSV found. Put Application Data 2025_2026.csv in the app folder/GitHub repo, "
+            "set DATA_URL in Streamlit secrets, or upload a CSV from the sidebar."
+        )
+        try:
+            st.error(msg)
+            st.stop()
+        finally:
+            raise RuntimeError(msg)
+
+    if not isinstance(raw_df, pd.DataFrame):
+        msg = "The loaded intake data is not a pandas DataFrame."
+        try:
+            st.error(msg)
+            st.stop()
+        finally:
+            raise RuntimeError(msg)
+
+    if len(raw_df) == 0:
+        msg = "The loaded intake CSV has zero rows."
+        try:
+            st.error(msg)
+            st.stop()
+        finally:
+            raise RuntimeError(msg)
+
+    return raw_df
+
+
+def find_default_data_file():
+    """
+    Find default CSV in either the current working directory or the folder
+    where app.py lives. This makes local and Streamlit Cloud deployment easier.
+    """
+    candidates = [
+        "Application Data 2025_2026.csv",
+        "Application_Data_2025_2026.csv",
+        "application_data_2025_2026.csv",
+        "data.csv",
+    ]
+
+    search_dirs = [Path.cwd()]
+    try:
+        search_dirs.append(Path(__file__).resolve().parent)
+    except Exception:
+        pass
+
+    for d in search_dirs:
+        for name in candidates:
+            p = d / name
+            if p.exists() and p.is_file():
+                return p
+
+    # Last fallback: first CSV in app directory/current directory, but avoid huge ambiguity
+    for d in search_dirs:
+        csvs = sorted([p for p in d.glob("*.csv") if p.is_file()])
+        if len(csvs) == 1:
+            return csvs[0]
+
+    return None
 
 
 def fresh_policy():
@@ -203,12 +271,21 @@ def deep_merge_policy(default_policy, user_policy):
 
     thresholds = ensure_section("thresholds")
     thresholds.setdefault("primary_poverty", 0.40)
-    thresholds.setdefault("poverty_score", 0.60)
+    thresholds.setdefault("poverty_score", 0.40)
+
+    secondary = ensure_section("secondary_score")
+    secondary.setdefault("max_score", 24.8)
+    secondary.setdefault("decay_lambda", 3.0e-5)
+
+    poverty_score = ensure_section("poverty_score")
+    poverty_score.setdefault("max_score", 24.8)
+    poverty_score.setdefault("midpoint", 0.40)
+    poverty_score.setdefault("steepness", 10.0)
 
     family_scores = ensure_section("family_scores")
-    family_scores.setdefault("method", "linear")
+    family_scores.setdefault("method", "log")
     family_scores.setdefault("max_score", 20.9)
-    family_scores.setdefault("fmax", 7)
+    family_scores.setdefault("fmax", 10)
     family_scores.setdefault("small", 9.3)
     family_scores.setdefault("medium", 16.4)
     family_scores.setdefault("large", 20.9)
@@ -223,17 +300,16 @@ def deep_merge_policy(default_policy, user_policy):
     inc = ensure_section("income_adjustment")
     inc.setdefault("enabled", True)
     inc.setdefault("threshold", 399996)
-    inc.setdefault("k", 24)
+    inc.setdefault("k", 15)
     inc.setdefault("lambda", 0.20)
     inc.setdefault("curve", "smoothstep")
     inc.setdefault("exclude_equity_adjusted", True)
 
     uni = ensure_section("university_allocation")
-    uni.setdefault("hh_formula", "ability_share_cap")
-    uni.setdefault("hh_min_share", 0.10)
-    uni.setdefault("hh_ability_share", 0.40)
+    uni.setdefault("hh_formula", "official_cap_curve")
+    uni.setdefault("hh_intercept_mode", "official_cap_curve")
     uni.setdefault("hh_cap", 150000)
-    uni.setdefault("hh_intercept_mode", "ability_share_cap")
+    uni.setdefault("hh_need_discount", 0.90)
     uni.setdefault("hh_intercept_amount", 150000)
     uni.setdefault("hh_coefficient", -135000)
     uni.setdefault("ss_intercept", 0.15)
@@ -761,8 +837,8 @@ def policy_warning_table(base_df, scen_df, agg_compare, scenario_policy):
         share_inc = (ch > 0).mean()
         if share_inc > float(safety.get("hh_increase_share_warning", 0.40)):
             warnings.append({"level": "Medium", "warning": "Large share of students have increased HH", "value": fmt_share(share_inc), "policy_meaning": "Policy shifts burden to many households."})
-    if ua.get("hh_formula") == "ability_share_cap" and ua.get("hh_cap", 0) <= 0:
-        warnings.append({"level": "High", "warning": "HH formula has no positive cap", "value": "No cap", "policy_meaning": "Household contribution may become excessive for high-cost programmes."})
+    if ua.get("hh_intercept_mode") == "programme_cost" and not safety.get("enabled", False):
+        warnings.append({"level": "Medium", "warning": "Programme-cost HH mode without HH safety cap", "value": "No cap", "policy_meaning": "HH scales with programme cost and may create high-cost programme shocks."})
     return pd.DataFrame(warnings)
 
 # =====================================================
@@ -1012,6 +1088,8 @@ def filter_analysis_population_from_raw(raw_df, policy, selected_population):
 
 def population_counts_from_raw(raw_df, policy):
     """Counts used only to guide the user before running baseline."""
+    if not isinstance(raw_df, pd.DataFrame) or len(raw_df) == 0:
+        return {k: None for k in ANALYSIS_POPULATION_OPTIONS}
     try:
         classified = prepare_data_cached(raw_df, policy)
         return {
@@ -1349,9 +1427,7 @@ st.caption("Select analysis population first, run baseline for that population, 
 
 st.sidebar.header("1. Data Source")
 
-DEFAULT_DATA_FILE = Path("Application Data 2025_2026.csv")
 DATA_URL = None
-
 try:
     DATA_URL = st.secrets.get("DATA_URL", None)
 except Exception:
@@ -1373,23 +1449,17 @@ try:
     elif DATA_URL:
         raw_df = load_csv_url_cached(DATA_URL)
         data_name = "Live data from configured DATA_URL"
-    elif DEFAULT_DATA_FILE.exists():
-        raw_df = load_csv_path_cached(str(DEFAULT_DATA_FILE))
-        data_name = f"Bundled repo data: {DEFAULT_DATA_FILE.name}"
     else:
-        raw_df = None
-        data_name = None
+        default_data_file = find_default_data_file()
+        if default_data_file is not None:
+            raw_df = load_csv_path_cached(str(default_data_file))
+            data_name = f"Bundled/local data: {default_data_file.name}"
 except Exception as exc:
-    st.error("Could not read the intake CSV from upload, DATA_URL, or bundled repo file.")
+    st.error("Could not read the intake CSV from upload, DATA_URL, or bundled/local CSV file.")
     st.exception(exc)
     st.stop()
 
-if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
-    st.error(
-        "No intake data found. For live deployment, either push Application Data 2025_2026.csv "
-        "to the GitHub repo, or set DATA_URL in Streamlit secrets."
-    )
-    st.stop()
+raw_df = stop_if_no_data(raw_df, data_name)
 
 st.sidebar.success(f"Loaded: {data_name} | Rows: {len(raw_df):,}")
 
@@ -1462,7 +1532,7 @@ st.session_state["scenario_name"] = st.sidebar.text_input("New scenario name", v
 
 if not isinstance(st.session_state.get("scenarios"), dict):
     st.session_state["scenarios"] = {}
-saved_names = list(st.session_state.get("scenarios") if isinstance(st.session_state.get("scenarios"), dict) else {}.keys())
+saved_names = list(st.session_state.get("scenarios", {}).keys()) if isinstance(st.session_state.get("scenarios"), dict) else []
 if saved_names:
     current_active = st.session_state.get("active_scenario")
     idx = saved_names.index(current_active) if current_active in saved_names else 0
@@ -1500,26 +1570,30 @@ with st.sidebar.form("scenario_form"):
     scenario_policy["weights"]["family"] = family_w
     st.metric("Family weight", f"{family_w:.1f}")
 
-    st.subheader("4. Poverty Thresholds")
-    scenario_policy["thresholds"]["primary_poverty"] = st.slider("Primary poverty threshold", 0.10, 1.00, float(old_policy.get("thresholds", {}).get("primary_poverty", 0.40)), 0.01)
-    scenario_policy["thresholds"]["poverty_score"] = st.slider("Poverty score threshold", 0.10, 1.00, float(old_policy.get("thresholds", {}).get("poverty_score", 0.60)), 0.01)
+    st.subheader("4. Poverty and Fee Score Parameters")
+    scenario_policy["thresholds"]["primary_poverty"] = st.slider("Primary poverty threshold θp", 0.10, 1.00, float(old_policy.get("thresholds", {}).get("primary_poverty", 0.40)), 0.01)
+    scenario_policy["thresholds"]["poverty_score"] = 0.40
 
-    st.subheader("5. Family Score")
+    sec_old = old_policy.get("secondary_score") if isinstance(old_policy.get("secondary_score"), dict) else {}
+    scenario_policy["secondary_score"]["max_score"] = st.number_input("Secondary maximum score", 0.0, 50.0, float(sec_old.get("max_score", 24.8)), 0.1)
+    scenario_policy["secondary_score"]["decay_lambda"] = st.number_input("Secondary decay lambda", 0.000001, 0.000100, float(sec_old.get("decay_lambda", 3.0e-5)), 0.000001, format="%.6f")
+
+    pov_old = old_policy.get("poverty_score") if isinstance(old_policy.get("poverty_score"), dict) else {}
+    scenario_policy["poverty_score"]["max_score"] = st.number_input("Poverty maximum score", 0.0, 50.0, float(pov_old.get("max_score", 24.8)), 0.1)
+    scenario_policy["poverty_score"]["midpoint"] = st.slider("Poverty logistic midpoint P0", 0.0, 1.0, float(pov_old.get("midpoint", 0.40)), 0.01)
+    scenario_policy["poverty_score"]["steepness"] = st.slider("Poverty logistic steepness k", 1.0, 30.0, float(pov_old.get("steepness", 10.0)), 0.5)
+    st.caption("Poverty equation: S = max_score / (1 + exp[-k(P - P0)]). Secondary equation: S = max_score × exp(-λ × NetSecondaryFees).")
+
+    st.subheader("5. Family Size Score")
     fam_old = old_policy.get("family_scores") if isinstance(old_policy.get("family_scores"), dict) else {}
-    scenario_policy["family_scores"]["method"] = "linear"
-    scenario_policy["family_scores"]["max_score"] = st.number_input(
-        "Family maximum score",
-        0.0, 50.0,
-        float(fam_old.get("max_score", fam_old.get("large", 20.9))),
-        0.1
+    scenario_policy["family_scores"]["method"] = st.selectbox(
+        "Family score method",
+        ["log", "linear", "band"],
+        index=["log", "linear", "band"].index(fam_old.get("method", "log") if fam_old.get("method", "log") in ["log", "linear", "band"] else "log")
     )
-    scenario_policy["family_scores"]["fmax"] = st.number_input(
-        "Family size cap Fmax",
-        1, 30,
-        int(fam_old.get("fmax", 7)),
-        1
-    )
-    st.caption("Family equation: S_family = max_score × min(1, HouseholdSize / Fmax).")
+    scenario_policy["family_scores"]["max_score"] = st.number_input("Family maximum score", 0.0, 50.0, float(fam_old.get("max_score", fam_old.get("large", 20.9))), 0.1)
+    scenario_policy["family_scores"]["fmax"] = st.number_input("Family reference maximum size Fmax", 2, 30, int(fam_old.get("fmax", 10)), 1)
+    st.caption("Official family equation: S_family = max_score × min(1, ln(F) / ln(Fmax)). Default Fmax = 10.")
 
     st.subheader("6. Equity Adjustment")
     eq = scenario_policy["equity_adjustment"]
@@ -1529,30 +1603,30 @@ with st.sidebar.form("scenario_form"):
     eq["one_parent_alpha"] = st.slider("One-parent alpha", 0.0, 1.0, float(old_eq.get("one_parent_alpha", 0.50)), 0.01)
     eq["ncpwd_alpha"] = st.slider("Student disability alpha", 0.0, 1.0, float(old_eq.get("ncpwd_alpha", 0.50)), 0.01)
     eq["orphan_alpha"] = st.slider("Orphan alpha", 0.0, 1.0, float(old_eq.get("orphan_alpha", 1.00)), 0.01)
+    eq["parent_disability_alpha"] = st.slider("Parent disability alpha", 0.0, 1.0, float(old_eq.get("parent_disability_alpha", 0.50)), 0.01)
+    eq["cash_transfer_alpha"] = st.slider("Cash transfer household alpha", 0.0, 1.0, float(old_eq.get("cash_transfer_alpha", 0.50)), 0.01)
     st.caption("Equity equation: M_new = M_old + alpha × (100 - M_old). Income adjustment is excluded for equity-adjusted students by default.")
 
     st.subheader("7. Income Adjustment")
     inc = scenario_policy["income_adjustment"]
     old_inc = old_policy.get("income_adjustment") if isinstance(old_policy.get("income_adjustment"), dict) else {}
-    inc["enabled"] = st.checkbox("Enable income adjustment", value=bool(old_inc.get("enabled", True)))
-    inc["threshold"] = st.number_input("Income per household threshold T_IPH", 0, 2000000, int(old_inc.get("threshold", 399996)), 1000)
-    inc["k"] = st.slider("Income scaling factor k", 1.1, 50.0, float(old_inc.get("k", 24)), 0.1)
-    inc["lambda"] = st.slider("Maximum income lambda λ", 0.0, 0.50, float(old_inc.get("lambda", 0.20)), 0.01)
+    inc["enabled"] = st.checkbox("Enable income adjustment", value=bool(old_inc["enabled"]))
+    inc["threshold"] = st.number_input("Income per household threshold T_IPH", 0, 10000000, int(old_inc.get("threshold", 399996)), 1000)
+    inc["k"] = st.slider("Income scaling factor k", 1.1, 50.0, float(old_inc.get("k", 15)), 0.1)
+    inc["lambda"] = st.slider("Maximum income lambda", 0.0, 0.50, float(old_inc.get("lambda", 0.20)), 0.01)
     inc["curve"] = st.selectbox("Income adjustment curve", ["smoothstep", "linear"], index=0 if old_inc.get("curve", "smoothstep") == "smoothstep" else 1)
     inc["exclude_equity_adjusted"] = st.checkbox("Exclude equity-adjusted students from income adjustment", value=bool(old_inc.get("exclude_equity_adjusted", True)))
-    st.caption("Income equation: z = min(1, max(0, (IPH - T_IPH) / ((k - 1)T_IPH))); M_final = M × [1 - λ(3z² - 2z³)].")
 
     st.subheader("8. University Allocation")
     ua = scenario_policy["university_allocation"]
     old_ua = old_policy.get("university_allocation") if isinstance(old_policy.get("university_allocation"), dict) else {}
 
-    ua["hh_formula"] = "ability_share_cap"
-    ua["hh_intercept_mode"] = "ability_share_cap"
-    ua["hh_min_share"] = st.slider("HH minimum programme-cost share", 0.0, 1.0, float(old_ua.get("hh_min_share", 0.10)), 0.01)
-    ua["hh_ability_share"] = st.slider("HH ability-based additional share", 0.0, 1.0, float(old_ua.get("hh_ability_share", 0.40)), 0.01)
-    ua["hh_cap"] = st.number_input("HH cap", 0, 1000000, int(old_ua.get("hh_cap", old_ua.get("hh_intercept_amount", 150000))), 5000)
+    ua["hh_formula"] = "official_cap_curve"
+    ua["hh_intercept_mode"] = "official_cap_curve"
+    ua["hh_cap"] = st.number_input("University HH cap", 0, 1000000, int(old_ua.get("hh_cap", old_ua.get("hh_intercept_amount", 150000))), 5000)
+    ua["hh_need_discount"] = st.slider("University HH MTI discount coefficient", 0.0, 1.0, float(old_ua.get("hh_need_discount", 0.90)), 0.01)
     ua["hh_intercept_amount"] = ua["hh_cap"]
-    ua["hh_coefficient"] = -135000
+    ua["hh_coefficient"] = -ua["hh_cap"] * ua["hh_need_discount"]
 
     ua["ss_intercept"] = st.slider("Scholarship intercept", 0.0, 1.0, float(old_ua.get("ss_intercept", 0.15)), 0.01)
     ua["ss_coefficient"] = st.slider("Scholarship coefficient on MTI x", -1.0, 1.0, float(old_ua.get("ss_coefficient", 0.40)), 0.01)
@@ -1560,7 +1634,7 @@ with st.sidebar.form("scenario_form"):
     ua["ll_coefficient"] = -ua["ss_coefficient"]
     ua["upkeep_intercept"] = st.number_input("Upkeep intercept", 0, 200000, int(old_ua.get("upkeep_intercept", 40000)), 1000)
     ua["upkeep_coefficient"] = st.number_input("Upkeep coefficient on MTI x", -100000, 200000, int(old_ua.get("upkeep_coefficient", 20000)), 1000)
-    st.caption("HH equation: HH = min(HH cap, P × [minimum share + ability share × ((100 - MTI) / 100)], P). Then R = P - HH, SS = R × scholarship share, LL = R - SS.")
+    st.caption("University equations: H = min{HH cap × (1 - discount × x), PC}; R = PC - H; S = R(0.15 + 0.40x); L = R - S; U = 40,000 + 20,000x.")
 
 
     st.subheader("8B. HH Safety / Hybrid Cap")
@@ -1571,7 +1645,7 @@ with st.sidebar.form("scenario_form"):
     hs["warning_threshold"] = st.number_input("HH warning threshold", 0, 1000000, int(old_hs.get("warning_threshold", 200000)), 5000)
     hs["hh_share_warning"] = st.slider("HH share warning threshold", 0.0, 1.0, float(old_hs.get("hh_share_warning", 0.50)), 0.01)
     hs["hh_increase_share_warning"] = st.slider("HH increase share warning threshold", 0.0, 1.0, float(old_hs.get("hh_increase_share_warning", 0.40)), 0.01)
-    st.caption("Main HH cap is now part of the HH equation above. This section remains as an additional diagnostic/backstop layer and warning system. Identity still holds because LL remains residual.")
+    st.caption("When enabled, university HH is capped after the selected HH formula: HH = min(HH_formula, HH safety cap, PC). Identity still holds because LL remains residual.")
     st.subheader("9. TVET Allocation")
     ta = scenario_policy["tvet_allocation"]
     old_ta = old_policy.get("tvet_allocation") if isinstance(old_policy.get("tvet_allocation"), dict) else {}
@@ -1591,10 +1665,8 @@ if create_scenario:
     errors = []
     if family_w < 0:
         errors.append("MTI weights exceed 100%.")
-    if ua.get("hh_min_share", 0) < 0 or ua.get("hh_ability_share", 0) < 0 or ua.get("hh_cap", 0) < 0:
-        errors.append("HH formula parameters cannot be negative.")
-    if ua.get("hh_min_share", 0) + ua.get("hh_ability_share", 0) > 1:
-        errors.append("HH minimum share plus ability share should not exceed 100% of programme cost before cap.")
+    if ua.get("hh_cap", 0) < 0 or not (0 <= ua.get("hh_need_discount", 0.90) <= 1):
+        errors.append("University HH cap must be non-negative and HH discount must be between 0 and 1.")
     if ua["ss_intercept"] + ua["ss_coefficient"] < 0:
         errors.append("Scholarship share at MTI=100 cannot be negative.")
     if ua["ss_intercept"] + ua["ss_coefficient"] > 1:

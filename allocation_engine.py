@@ -24,45 +24,25 @@ import pandas as pd
 
 def compute_university_allocation(df, policy, mti_col="MTI_final"):
     """
-    University allocation.
-
-    x = MTI / 100
-    ability = (100 - MTI) / 100 = 1 - x
-    P = Programme Cost
-
-    HH_raw = P * (hh_min_share + hh_ability_share * ability)
-    HH = min(hh_cap, HH_raw, P)
-
-    R = P - HH
-    SS = R * (ss_intercept + ss_coefficient*x)
-    LL = R - SS
-    Upkeep = upkeep_intercept + upkeep_coefficient*x
+    Official FY2026/2027 university allocation:
+    H = min{hh_cap * (1 - hh_need_discount*x), PC}
+    R = PC - H
+    S = R * (ss_intercept + ss_coefficient*x)
+    L = R - S
+    U = upkeep_intercept + upkeep_coefficient*x
     """
-
     df = df.copy()
     p = policy["university_allocation"]
 
     x = df[mti_col].clip(0, 100) / 100
     PC = pd.to_numeric(df["ProgramCost"], errors="coerce").fillna(0)
-    ability = 1 - x
 
-    formula = str(p.get("hh_formula", p.get("hh_intercept_mode", "ability_share_cap"))).lower()
+    hh_cap = float(p.get("hh_cap", p.get("hh_intercept_amount", 150000)))
+    hh_need_discount = float(p.get("hh_need_discount", 0.90))
 
-    if formula == "ability_share_cap":
-        min_share = float(p.get("hh_min_share", 0.10))
-        ability_share = float(p.get("hh_ability_share", 0.40))
-        hh_cap = float(p.get("hh_cap", p.get("hh_intercept_amount", 150000)))
-        df["HH_raw"] = PC * (min_share + ability_share * ability)
-        df["HH"] = np.minimum(np.minimum(df["HH_raw"], hh_cap), PC)
-    else:
-        if p.get("hh_intercept_mode") == "programme_cost":
-            hh_intercept = PC
-        else:
-            hh_intercept = p.get("hh_intercept_amount", 150000)
-        df["HH_raw"] = hh_intercept + p.get("hh_coefficient", -135000) * x
-        df["HH"] = np.minimum(df["HH_raw"], PC)
+    df["HH_raw"] = hh_cap * (1 - hh_need_discount * x)
+    df["HH"] = np.minimum(df["HH_raw"], PC).clip(lower=0)
 
-    df["HH"] = df["HH"].clip(lower=0)
     df["FinancingGap"] = PC - df["HH"]
 
     df["SS_gap_share_raw"] = p["ss_intercept"] + p["ss_coefficient"] * x
@@ -76,9 +56,7 @@ def compute_university_allocation(df, policy, mti_col="MTI_final"):
 
     df["Upkeep"] = (p["upkeep_intercept"] + p["upkeep_coefficient"] * x).clip(lower=0)
     df["PC_allocation"] = PC
-
     return df
-
 
 
 def compute_tvet_allocation(df, policy, mti_col="MTI_final"):

@@ -27,6 +27,24 @@ import numpy as np
 import pandas as pd
 
 
+def _series(df, col, default=0):
+    if isinstance(df, pd.DataFrame) and col in df.columns:
+        return df[col]
+    return pd.Series(default, index=df.index)
+
+
+def _numeric_series(df, col, default=0):
+    return pd.to_numeric(_series(df, col, default), errors="coerce").fillna(default)
+
+
+def _bool_series(df, col, default=False):
+    s = _series(df, col, default)
+    if getattr(s, "dtype", None) == bool:
+        return s.fillna(default).astype(bool)
+    ss = s.astype(str).str.upper().str.strip()
+    return ss.isin(["1", "TRUE", "YES", "Y", "T"])
+
+
 def _clean_str(series):
     return series.astype(str).str.upper().str.strip()
 
@@ -76,27 +94,34 @@ def is_one_parent_series(series):
 
 def compute_household_size(df):
     """
-    HouseholdSize = Parents + Applicant(1) + NumberofChildren + SiblingsHigherEduc.
+    HouseholdSize = Parents + Applicant(1) + SchoolGoingSiblings + SiblingsHigherEduc.
+
+    Current-data approximation:
+    - Parents inferred from FamilyStructure.
+    - SchoolGoingSiblings from NumberofChildren unless verified/self-declared sibling fields exist.
+    - SiblingsHigherEduc from SiblingsHigherEduc.
     """
     df = df.copy()
 
-    for col in ["FamilyStructure", "NumberofChildren", "SiblingsHigherEduc"]:
-        if col not in df.columns:
-            if col == "FamilyStructure":
-                df[col] = ""
-            else:
-                df[col] = 0
+    if "FamilyStructure" not in df.columns:
+        df["FamilyStructure"] = ""
 
     df["ParentsCount"] = df["FamilyStructure"].apply(infer_parents)
-    df["NumberofChildren"] = pd.to_numeric(df["NumberofChildren"], errors="coerce").fillna(0).clip(0, 10)
-    df["SiblingsHigherEduc"] = pd.to_numeric(df["SiblingsHigherEduc"], errors="coerce").fillna(0).clip(0, 5)
+
+    if "NEMISVerifiedSiblings" in df.columns and "SelfDeclaredSiblings" in df.columns:
+        school_siblings = np.minimum(
+            _numeric_series(df, "NEMISVerifiedSiblings", 0),
+            _numeric_series(df, "SelfDeclaredSiblings", 0),
+        )
+    else:
+        school_siblings = _numeric_series(df, "NumberofChildren", 0)
+
+    df["SchoolGoingSiblings"] = pd.to_numeric(school_siblings, errors="coerce").fillna(0).clip(0, 20)
+    df["SiblingsHigherEduc"] = _numeric_series(df, "SiblingsHigherEduc", 0).clip(0, 10)
 
     df["HouseholdSize"] = (
-        df["ParentsCount"]
-        + 1
-        + df["NumberofChildren"]
-        + df["SiblingsHigherEduc"]
-    )
+        df["ParentsCount"] + 1 + df["SchoolGoingSiblings"] + df["SiblingsHigherEduc"]
+    ).clip(lower=1)
 
     return df
 
@@ -107,53 +132,51 @@ def compute_household_size(df):
 
 def compute_primary_score(df, policy):
     """
-    S_primary = ((C - NetPrimaryFees) / C) * PovertyFactorPrimary * primary_weight
-
-    PovertyFactorPrimary = min(1, PovertyProbability / primary_poverty_threshold)
-
-    Available current data supports mapped fees and sponsorship. Additional
-    overrides are applied only if corresponding columns exist.
+    Primary score:
+    NetPrimaryFees = max(0, PrimaryFees - PrimaryArrears)
+    PovertyFactorPrimary = min(1, PovertyProbability / theta_p), with verified overrides set to 1.
+    S_primary = ((C - NetPrimaryFees) / C) * PovertyFactorPrimary * 29.5
+    C is programme-specific: 150,000 for university and 67,189 for TVET.
     """
     df = df.copy()
-
     weights = policy["weights"]
     thresholds = policy["thresholds"]
 
-    df["PovertyIndex"] = pd.to_numeric(df.get("PovertyIndex", 0), errors="coerce").fillna(0).clip(0, 100)
-    df["PovertyProbability"] = df["PovertyIndex"] / 100
+    if "PovertyProbability" not in df.columns:
+        df["PovertyProbability"] = _numeric_series(df, "PovertyIndex", 0).clip(0, 100) / 100
+    else:
+        df["PovertyProbability"] = pd.to_numeric(df["PovertyProbability"], errors="coerce").fillna(0).clip(0, 1)
 
-    primary_threshold = max(float(thresholds["primary_poverty"]), 1e-9)
-    df["PovertyFactorPrimary"] = np.minimum(1, df["PovertyProbability"] / primary_threshold)
+    theta = max(float(thresholds.get("primary_poverty", 0.40)), 1e-9)
+    df["PovertyFactorPrimary"] = np.minimum(1.0, df["PovertyProbability"] / theta)
 
-    sponsored_primary = df.get("SponsoredPrimary_flag", False)
-    sponsored_secondary = df.get("SponsoredSecondary_flag", False)
-    sponsored_primary = sponsored_primary if isinstance(sponsored_primary, pd.Series) else pd.Series(False, index=df.index)
-    sponsored_secondary = sponsored_secondary if isinstance(sponsored_secondary, pd.Series) else pd.Series(False, index=df.index)
+    sponsored_primary = _bool_series(df, "SponsoredPrimary_flag", False) | _bool_series(df, "SponsoredPrimary", False)
+    sponsored_secondary = _bool_series(df, "SponsoredSecondary_flag", False) | _bool_series(df, "SponsoredSecondary", False)
+    primary_arrears = _numeric_series(df, "PrimaryArrears", 0).clip(lower=0)
+    placement_downgrade = _bool_series(df, "SecondaryPlacementDowngrade_flag", False) | _bool_series(df, "SecondaryPlacementDowngrade", False)
+    school_feeding = _bool_series(df, "SchoolFeedingPrimary_flag", False) | _bool_series(df, "SchoolFeedingPrimary", False)
 
-    # Optional policy overrides if future columns are present.
-    override = sponsored_primary.fillna(False) | sponsored_secondary.fillna(False)
-    for optional_col in [
-        "PrimaryArrears_flag",
-        "SchoolFeedingPrimary_flag",
-        "SecondaryPlacementDowngrade_flag",
-    ]:
-        if optional_col in df.columns:
-            override = override | df[optional_col].fillna(False).astype(bool)
+    override = (primary_arrears > 0) | sponsored_primary | sponsored_secondary | placement_downgrade | school_feeding
+    df.loc[override, "PovertyFactorPrimary"] = 1.0
 
-    df.loc[override, "PovertyFactorPrimary"] = 1
+    if "PrimaryFees" in df.columns:
+        primary_fees = np.maximum(_numeric_series(df, "PrimaryFees", 0), _numeric_series(df, "NetPrimaryFees", 0))
+    else:
+        primary_fees = _numeric_series(df, "NetPrimaryFees", 0)
 
-    df["C_affordability"] = pd.to_numeric(df["C_affordability"], errors="coerce").replace(0, np.nan)
-    df["NetPrimaryFees"] = pd.to_numeric(df["NetPrimaryFees"], errors="coerce")
+    df["NetPrimaryFees"] = (primary_fees - primary_arrears).clip(lower=0)
+    df.loc[sponsored_primary, "NetPrimaryFees"] = 0
 
-    affordability_ratio = (df["C_affordability"] - df["NetPrimaryFees"]) / df["C_affordability"]
+    if "C_affordability" in df.columns:
+        C = pd.to_numeric(df["C_affordability"], errors="coerce")
+    else:
+        is_tvet = _numeric_series(df, "is_tvet", 0).eq(1)
+        C = pd.Series(np.where(is_tvet, policy.get("tvet_cost", 67189), policy.get("university_cap", 150000)), index=df.index)
+    C = C.replace(0, np.nan).fillna(policy.get("university_cap", 150000))
 
-    df["S_primary"] = (
-        affordability_ratio
-        * df["PovertyFactorPrimary"]
-        * weights["primary"]
-    ).clip(0, weights["primary"])
-
-    df["S_primary"] = df["S_primary"].fillna(0)
+    affordability_ratio = ((C - df["NetPrimaryFees"]) / C).clip(0, 1)
+    w = float(weights.get("primary", 29.5))
+    df["S_primary"] = (affordability_ratio * df["PovertyFactorPrimary"] * w).clip(0, w).fillna(0)
     return df
 
 
@@ -162,17 +185,29 @@ def compute_primary_score(df, policy):
 # =====================================================
 
 def compute_secondary_score(df, policy):
-    """S_secondary = ((C - NetSecondaryFees) / C) * secondary_weight."""
+    """
+    Secondary score:
+    NetSecondaryFees = max(0, SecondaryFees - SecondaryArrears); sponsored secondary => 0.
+    S_secondary = max_score * exp(-decay_lambda * NetSecondaryFees)
+    """
     df = df.copy()
-    w = policy["weights"]["secondary"]
+    cfg = policy.get("secondary_score", {})
+    max_score = float(cfg.get("max_score", policy.get("weights", {}).get("secondary", 24.8)))
+    decay_lambda = float(cfg.get("decay_lambda", 3.0e-5))
 
-    df["C_affordability"] = pd.to_numeric(df["C_affordability"], errors="coerce").replace(0, np.nan)
-    df["NetSecondaryFees"] = pd.to_numeric(df["NetSecondaryFees"], errors="coerce")
+    arrears = _numeric_series(df, "SecondaryArrears", 0).clip(lower=0)
+    sponsored = _bool_series(df, "SponsoredSecondary_flag", False) | _bool_series(df, "SponsoredSecondary", False)
 
-    affordability_ratio = (df["C_affordability"] - df["NetSecondaryFees"]) / df["C_affordability"]
+    if "SecondaryFees" in df.columns:
+        fees = np.maximum(_numeric_series(df, "SecondaryFees", 0), _numeric_series(df, "NetSecondaryFees", 0))
+    else:
+        fees = _numeric_series(df, "NetSecondaryFees", 0)
 
-    df["S_secondary"] = (affordability_ratio * w).clip(0, w)
-    df["S_secondary"] = df["S_secondary"].fillna(0)
+    df["NetSecondaryFees"] = (fees - arrears).clip(lower=0)
+    df.loc[sponsored, "NetSecondaryFees"] = 0
+
+    df["S_secondary"] = max_score * np.exp(-decay_lambda * df["NetSecondaryFees"])
+    df["S_secondary"] = pd.to_numeric(df["S_secondary"], errors="coerce").fillna(0).clip(0, max_score)
     return df
 
 
@@ -181,17 +216,24 @@ def compute_secondary_score(df, policy):
 # =====================================================
 
 def compute_poverty_score(df, policy):
-    """S_poverty = min(1, PovertyProbability / poverty_threshold) * poverty_weight."""
+    """
+    Poverty score:
+    S_poverty = max_score / (1 + exp(-k * (P - P0)))
+    """
     df = df.copy()
-
-    w = policy["weights"]["poverty"]
-    threshold = max(float(policy["thresholds"]["poverty_score"]), 1e-9)
-
     if "PovertyProbability" not in df.columns:
-        df["PovertyProbability"] = pd.to_numeric(df.get("PovertyIndex", 0), errors="coerce").fillna(0).clip(0, 100) / 100
+        df["PovertyProbability"] = _numeric_series(df, "PovertyIndex", 0).clip(0, 100) / 100
+    else:
+        df["PovertyProbability"] = pd.to_numeric(df["PovertyProbability"], errors="coerce").fillna(0).clip(0, 1)
 
-    df["S_poverty"] = (np.minimum(1, df["PovertyProbability"] / threshold) * w).clip(0, w)
-    df["S_poverty"] = df["S_poverty"].fillna(0)
+    cfg = policy.get("poverty_score", {})
+    max_score = float(cfg.get("max_score", policy.get("weights", {}).get("poverty", 24.8)))
+    midpoint = float(cfg.get("midpoint", policy.get("thresholds", {}).get("poverty_score", 0.40)))
+    steepness = float(cfg.get("steepness", 10.0))
+
+    P = df["PovertyProbability"].clip(0, 1)
+    df["S_poverty"] = max_score / (1 + np.exp(-steepness * (P - midpoint)))
+    df["S_poverty"] = pd.to_numeric(df["S_poverty"], errors="coerce").fillna(0).clip(0, max_score)
     return df
 
 
@@ -201,47 +243,30 @@ def compute_poverty_score(df, policy):
 
 def compute_family_score(df, policy):
     """
-    Family score.
-
-    Default policy:
-        S_family = max_score * min(1, HouseholdSize / Fmax)
-
-    This replaces the older step-band approach and gives a smooth,
-    transparent marginal increase for each additional household member.
+    Family score:
+    S_family = max_score * min(1, ln(F) / ln(Fmax))
+    Default max_score = 20.9, Fmax = 10.
     """
     df = df.copy()
     fam = policy.get("family_scores", {})
-    method = str(fam.get("method", "linear")).lower()
-
-    household_size = pd.to_numeric(df["HouseholdSize"], errors="coerce").fillna(1).clip(lower=1)
+    method = str(fam.get("method", "log")).lower()
+    max_score = float(fam.get("max_score", policy.get("weights", {}).get("family", 20.9)))
+    fmax = max(float(fam.get("fmax", 10)), 2.0)
+    F = pd.to_numeric(df["HouseholdSize"], errors="coerce").fillna(1).clip(lower=1)
 
     if method == "linear":
-        max_score = float(fam.get("max_score", policy.get("weights", {}).get("family", 20.9)))
-        fmax = max(float(fam.get("fmax", 7)), 1.0)
-        df["S_family"] = max_score * np.minimum(1.0, household_size / fmax)
-    elif method == "log":
-        max_score = float(fam.get("max_score", policy.get("weights", {}).get("family", 20.9)))
-        fmax = max(float(fam.get("fmax", 7)), 2.0)
-        df["S_family"] = max_score * np.minimum(1.0, np.log(household_size) / np.log(fmax))
-    else:
-        df["S_family"] = np.select(
-            [
-                household_size <= 3,
-                (household_size >= 4) & (household_size <= 6),
-                household_size >= 7,
-            ],
-            [
-                float(fam.get("small", 9.3)),
-                float(fam.get("medium", 16.4)),
-                float(fam.get("large", 20.9)),
-            ],
+        score = max_score * np.minimum(1.0, F / fmax)
+    elif method == "band":
+        score = np.select(
+            [F <= 3, (F >= 4) & (F <= 6), F >= 7],
+            [float(fam.get("small", 9.3)), float(fam.get("medium", 16.4)), float(fam.get("large", 20.9))],
             default=float(fam.get("small", 9.3)),
         )
+    else:
+        score = max_score * np.minimum(1.0, np.log(F) / np.log(fmax))
 
-    max_allowed = float(fam.get("max_score", policy.get("weights", {}).get("family", 20.9)))
-    df["S_family"] = pd.to_numeric(df["S_family"], errors="coerce").fillna(0).clip(0, max_allowed)
+    df["S_family"] = pd.to_numeric(score, errors="coerce").fillna(0).clip(0, max_score)
     return df
-
 
 
 # =====================================================
@@ -278,34 +303,40 @@ def _apply_gap_adjustment(df, mask, alpha, condition_name):
 
 
 def apply_equity_adjustment(df, policy):
-    """Apply verified-equity adjustments sequentially and track application."""
+    """
+    Apply equity adjustments sequentially:
+    orphan -> one parent -> student disability -> parent disability -> cash transfer -> female.
+    """
     df = df.copy()
     eq = policy["equity_adjustment"]
 
     df["MTI_after_equity"] = df["MTI_baseline"]
     df["equity_applied"] = 0
 
-    for col in ["female", "one_parent", "ncpwd", "orphan"]:
+    for col in ["orphan", "one_parent", "ncpwd", "parent_disability", "cash_transfer", "female"]:
         df[f"equity_{col}"] = 0
 
     if not eq.get("enabled", False):
         df["MTI_after_equity"] = df["MTI_after_equity"].clip(0, 100)
         return df
 
-    gender = _clean_str(df.get("Gender", pd.Series("", index=df.index)))
-    family_structure = df.get("FamilyStructure", pd.Series("", index=df.index))
-    ncpwd = _clean_str(df.get("NCPWD", pd.Series("", index=df.index)))
+    gender = _clean_str(_series(df, "Gender", ""))
+    family_structure = _series(df, "FamilyStructure", "")
+    ncpwd = _clean_str(_series(df, "NCPWD", ""))
 
     female_mask = gender.eq("FEMALE") | gender.eq("F")
     one_parent_mask = is_one_parent_series(family_structure)
     ncpwd_mask = ncpwd.isin(["YES", "Y", "TRUE", "1", "NCPWD"])
     orphan_mask = is_orphan_series(family_structure)
+    parent_disability = _bool_series(df, "ParentDisability", False) | _bool_series(df, "ParentDisability_flag", False)
+    cash_transfer = _bool_series(df, "CashTransferBeneficiary", False) | _bool_series(df, "CashTransferBeneficiary_flag", False)
 
-    # Sequential application: each adjustment acts on the remaining gap.
-    df = _apply_gap_adjustment(df, female_mask, float(eq.get("female_alpha", 0)), "female")
+    df = _apply_gap_adjustment(df, orphan_mask, float(eq.get("orphan_alpha", 0)), "orphan")
     df = _apply_gap_adjustment(df, one_parent_mask, float(eq.get("one_parent_alpha", 0)), "one_parent")
     df = _apply_gap_adjustment(df, ncpwd_mask, float(eq.get("ncpwd_alpha", 0)), "ncpwd")
-    df = _apply_gap_adjustment(df, orphan_mask, float(eq.get("orphan_alpha", 0)), "orphan")
+    df = _apply_gap_adjustment(df, parent_disability, float(eq.get("parent_disability_alpha", 0.50)), "parent_disability")
+    df = _apply_gap_adjustment(df, cash_transfer, float(eq.get("cash_transfer_alpha", 0.50)), "cash_transfer")
+    df = _apply_gap_adjustment(df, female_mask, float(eq.get("female_alpha", 0)), "female")
 
     df["MTI_after_equity"] = df["MTI_after_equity"].clip(0, 100)
     return df
@@ -317,15 +348,11 @@ def apply_equity_adjustment(df, policy):
 
 def apply_income_adjustment(df, policy):
     """
-    Income adjustment.
-
-    M = MTI after baseline and equity adjustment.
-    T_IPH = income per household-member threshold.
-    k = income scaling factor.
-    U_IPH = k * T_IPH.
-    z = min(1, max(0, (IPH - T_IPH) / ((k - 1) * T_IPH)))
-    adjustment_ratio = 3z^2 - 2z^3
-    MTI_final = M * [1 - lambda * adjustment_ratio]
+    Income adjustment:
+    IPH = VerifiedAnnualHouseholdIncome / HouseholdSize
+    Z = min(1, max(0, (IPH - T_IPH) / ((k - 1) * T_IPH)))
+    ratio = 3Z^2 - 2Z^3
+    MTI_final = M * [1 - lambda * ratio]
     """
     df = df.copy()
     inc = policy["income_adjustment"]
@@ -338,14 +365,13 @@ def apply_income_adjustment(df, policy):
     if not inc.get("enabled", False):
         return df
 
-    df["HouseholdSize"] = pd.to_numeric(df["HouseholdSize"], errors="coerce").replace(0, np.nan)
-    df["VerifiedAnnualHouseholdIncome"] = pd.to_numeric(df.get("VerifiedAnnualHouseholdIncome", 0), errors="coerce").fillna(0)
+    household_size = pd.to_numeric(df["HouseholdSize"], errors="coerce").replace(0, np.nan)
+    income = _numeric_series(df, "VerifiedAnnualHouseholdIncome", 0)
+    df["IPH"] = income / household_size
 
-    df["IPH"] = df["VerifiedAnnualHouseholdIncome"] / df["HouseholdSize"]
-
-    T = float(inc["threshold"])
-    k = float(inc["k"])
-    lam = float(inc["lambda"])
+    T = float(inc.get("threshold", 399996))
+    k = float(inc.get("k", 15))
+    lam = float(inc.get("lambda", 0.20))
 
     if T <= 0:
         raise ValueError("Income threshold T_IPH must be positive.")
@@ -354,25 +380,20 @@ def apply_income_adjustment(df, policy):
     if not (0 <= lam <= 1):
         raise ValueError("Income lambda must be between 0 and 1.")
 
-    z = ((df["IPH"] - T) / ((k - 1) * T)).clip(0, 1).fillna(0)
-    if str(inc.get("curve", "smoothstep")).lower() == "linear":
-        adjustment_ratio = z
-    else:
-        adjustment_ratio = 3 * (z ** 2) - 2 * (z ** 3)
+    Z = ((df["IPH"] - T) / ((k - 1) * T)).clip(0, 1).fillna(0)
+    ratio = Z if str(inc.get("curve", "smoothstep")).lower() == "linear" else 3 * (Z ** 2) - 2 * (Z ** 3)
 
-    df["IncomeSmoothZ"] = z
-    df["IncomeAdjustmentRatio"] = adjustment_ratio
+    df["IncomeSmoothZ"] = Z
+    df["IncomeAdjustmentRatio"] = ratio
 
-    mask = df["VerifiedAnnualHouseholdIncome"] > 0
+    mask = income > 0
     if inc.get("exclude_equity_adjusted", True):
         mask = mask & (df.get("equity_applied", 0).fillna(0).astype(int) == 0)
 
     df.loc[mask, "MTI_final"] = df.loc[mask, "MTI_after_equity"] * (1 - lam * df.loc[mask, "IncomeAdjustmentRatio"])
     df.loc[mask & (df["IncomeAdjustmentRatio"] > 0), "income_adjustment_applied"] = 1
-
     df["MTI_final"] = df["MTI_final"].clip(0, 100)
     return df
-
 
 
 # =====================================================

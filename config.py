@@ -27,14 +27,25 @@ BASE_POLICY = {
     # Poverty thresholds used in the MTI document.
     "thresholds": {
         "primary_poverty": 0.40,
-        "poverty_score": 0.60,
+        "poverty_score": 0.40,
+    },
+
+    "secondary_score": {
+        "max_score": 24.8,
+        "decay_lambda": 3.0e-5,
+    },
+
+    "poverty_score": {
+        "max_score": 24.8,
+        "midpoint": 0.40,
+        "steepness": 10.0,
     },
 
     # Household-size score bands.
     "family_scores": {
-        "method": "linear",
+        "method": "log",
         "max_score": 20.9,
-        "fmax": 7,
+        "fmax": 10,
         "small": 9.3,
         "medium": 16.4,
         "large": 20.9,
@@ -75,7 +86,7 @@ BASE_POLICY = {
     "income_adjustment": {
         "enabled": True,
         "threshold": 399_996,
-        "k": 24,
+        "k": 15,
         "lambda": 0.20,
         "curve": "smoothstep",
         "exclude_equity_adjusted": True,
@@ -94,12 +105,11 @@ BASE_POLICY = {
         "hh_increase_share_warning": 0.40,
     },
     "university_allocation": {
-        "hh_formula": "ability_share_cap",
-        "hh_min_share": 0.10,
-        "hh_ability_share": 0.40,
+        "hh_formula": "official_cap_curve",
         "hh_cap": 150000,
+        "hh_need_discount": 0.90,
 
-        "hh_intercept_mode": "ability_share_cap",
+        "hh_intercept_mode": "official_cap_curve",
         "hh_intercept_amount": 150000,
         "hh_coefficient": -135000,
 
@@ -153,9 +163,10 @@ def validate_policy(policy):
         "weight_sum": weight_sum,
         "weights_sum_to_100": abs(weight_sum - 100) < 1e-6,
         "family_weight_non_negative": policy["weights"].get("family", 0) >= 0,
-        "hh_intercept_mode_valid": uni.get("hh_intercept_mode") in ["fixed_amount", "programme_cost", "ability_share_cap"],
-        "family_scoring_valid": policy.get("family_scores", {}).get("fmax", 0) > 0 and policy.get("family_scores", {}).get("max_score", 0) >= 0,
-        "hh_ability_formula_valid": uni.get("hh_min_share", 0) >= 0 and uni.get("hh_ability_share", 0) >= 0 and uni.get("hh_cap", 0) >= 0,
+        "family_scoring_valid": policy.get("family_scores", {}).get("fmax", 0) > 1 and policy.get("family_scores", {}).get("max_score", 0) >= 0,
+        "secondary_score_valid": policy.get("secondary_score", {}).get("decay_lambda", 0) >= 0,
+        "poverty_logistic_valid": policy.get("poverty_score", {}).get("steepness", 0) > 0,
+        "hh_intercept_mode_valid": uni.get("hh_intercept_mode") in ["fixed_amount", "programme_cost", "official_cap_curve"],
         "university_ss_share_valid_for_x_0_to_1": uni_ss_min >= 0 and uni_ss_max <= 1,
         "university_allocation_identity_coefficients": (
             abs(uni["ss_intercept"] + uni["ll_intercept"] - 1.0) < 1e-6
@@ -171,4 +182,5 @@ def validate_policy(policy):
         "hh_warning_threshold": policy.get("hh_safety", {}).get("warning_threshold", None),
         "income_k_valid": policy["income_adjustment"]["k"] > 1,
         "income_lambda_valid": 0 <= policy["income_adjustment"]["lambda"] <= 1,
+        "university_hh_formula_valid": uni.get("hh_cap", 0) >= 0 and 0 <= uni.get("hh_need_discount", 0) <= 1,
     }
